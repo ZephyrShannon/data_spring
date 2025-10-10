@@ -1,0 +1,4 @@
+data/
+.idea
+spot_logs/
+*.log

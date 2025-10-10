@@ -1,0 +1,22 @@
+# config.yaml
+download:
+  base_dir: "data"               # 下载根目录
+  biz: ["futures_usdt"]     # 支持多个 biz
+  market: ["BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "GT_USDT", "DOGE_USDT", "XRP_USDT"] # 支持多个 market
+  types:
+    - "trades"
+    - "mark_prices"
+    - "funding_applies"
+    - "funding_updates"
+    - "candlesticks_1m"
+    - "candlesticks_5m"
+    - "candlesticks_1h"
+    - "orderbooks"
+  start_date: "2023-04-25 00:00"  # 开始时间（本地时间，脚本自动转为UTC）
+  end_date: "2023-04-26 00:00"    # 结束时间（本地时间）
+  timezone_offset: -8              # 本地时区相对于UTC的偏移（中国为UTC+8，所以偏移是-8）
+
+logging:
+  log_dir: "./futures_logs"
+
+history_file: "./futures_usdt_history.log"

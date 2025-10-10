@@ -1,0 +1,27 @@
+# config.yaml
+
+# 数据源和存储
+base_url: https://download.gatedata.org
+data_root: ./data
+
+# 下载任务配置
+tasks:
+  - biz: spot
+    markets: [GT_USDT, BTC_USDT]         # 支持多个市场
+    types: [deals, candlesticks_1m, orderbooks]   # 多种数据类型
+    start_year: 2023
+    start_month: 1
+    end_year: 2023
+    end_month: 6
+
+  - biz: future_usdt
+    markets: [BTC_USDT]
+    types: [trades, funding_updates]
+    start_year: 2023
+    start_month: 4
+    end_year: 2023
+    end_month: 5
+
+# 日志配置
+log_dir: ./logs
+history_file: download_history.log
