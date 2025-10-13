@@ -104,9 +104,7 @@ TIME_GRANULARITY = {
 def generate_time_intervals(start_utc: str, end_utc: str, granularity: str) -> List[datetime]:
     start_utc = parse_datetime(start_utc)
     end_utc = parse_datetime(end_utc)
-
     intervals = []
-
     if granularity == "hourly":
         current = start_utc.replace(minute=0, second=0, microsecond=0)
         while current < end_utc:
@@ -127,7 +125,6 @@ def generate_time_intervals(start_utc: str, end_utc: str, granularity: str) -> L
                 current = current.replace(month=current.month + 1)
     else:
         raise ValueError(f"不支持的时间粒度: {granularity}")
-
     return intervals
 
 
@@ -153,7 +150,6 @@ def build_url(biz: str, data_type: str, market: str, dt: datetime) -> str:
         filename += f".csv.gz"
     else:
         filename += f"{day}{hour}.csv.gz"
-
     return urljoin(base, path + filename)
 
 
@@ -163,16 +159,24 @@ def get_local_filepath(base_dir: str, url: str) -> Path:
     return Path(base_dir) / rel_path
 
 
-def check_if_downloaded(history_file: str, url: str) -> bool:
-    if not os.path.exists(history_file):
-        return False
-    with open(history_file, 'r', encoding='utf-8') as f:
-        return any(url.strip() == line.strip() for line in f)
+class HistoryRecord:
+    def __init__(self, history_file):
+        self.history_file = history_file
+        existing_files = set()
+        if Path(history_file).exists():
+            with open(history_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    existing_files.add(line)
+        self.existing_files = existing_files
 
+    def check_if_downloaded(self, url: str):
+        return self.existing_files.__contains__(url)
 
-def mark_as_downloaded(history_file: str, url: str):
-    with open(history_file, 'a', encoding='utf-8') as f:
-        f.write(url + "\n")
+    def mark_as_downloaded(self, url):
+        with open(self.history_file, 'a', encoding='utf-8') as f:
+            f.write(url + "\n")
+        self.existing_files.add(url)
+
 
 
 def download_file(url: str, temp_path: Path) -> bool:
@@ -194,6 +198,7 @@ def download_file(url: str, temp_path: Path) -> bool:
         temp_path.unlink(missing_ok=True)
         return False
 
+
 def check_and_create_ticks(filepath: Path, dt: datetime):
     root_parent = filepath.parent.parent.parent
     parent = root_parent / "deals"
@@ -207,7 +212,9 @@ def check_and_create_ticks(filepath: Path, dt: datetime):
     if not tick_file.exists():
         recreate_ticks.generate_ticks(filepath, deal_path, tick_file)
 
+
 def download_data(base_dir, biz_list, markets, types, start_utc, end_utc, history_file):
+    history_file = HistoryRecord(history_file)
     logger.info(f"开始下载任务...")
     logger.info(f"时间范围: {start_utc} ~ {end_utc}")
 
@@ -231,25 +238,22 @@ def download_data(base_dir, biz_list, markets, types, start_utc, end_utc, histor
                         url = build_url(biz, data_type, market, dt)
                         filepath = get_local_filepath(base_dir, url)
                         logger.info(f"Download {url} to {filepath}")
-
                         # 普通文件处理
-                        in_history_file = check_if_downloaded(history_file, url)
+                        in_history_file = history_file.check_if_downloaded(url)
                         if filepath.exists() and in_history_file:
                             logger.info(f"已存在或已下载，跳过: {filepath}")
                             if not in_history_file:
-                                mark_as_downloaded(history_file, url)
+                                history_file.mark_as_downloaded(url)
                         else:
                             if not download_file(url, filepath):
                                 logger.warning(f"下载失败: {url}")
                                 continue
                             else:
-                                mark_as_downloaded(history_file, url)
+                                history_file.mark_as_downloaded(url)
                         if data_type == "orderbooks":
                             check_and_create_ticks(filepath, dt)
                         elif data_type == "deals":
-                            pass
-                            #preprocess_monthly_deals(filepath, filepath.parent)
-
+                            preprocess_monthly_deals(filepath, filepath.parent)
 
 
 # =====================================================

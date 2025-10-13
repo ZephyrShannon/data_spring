@@ -8,19 +8,19 @@ data_root: ./data
 tasks:
   - biz: spot
     markets: [GT_USDT, BTC_USDT]         # 支持多个市场
-    types: [deals, candlesticks_1m, orderbooks]   # 多种数据类型
+    types: [deals,  orderbooks, candlesticks_1m, candlesticks_1h, candlesticks_1d]   # 多种数据类型
     start_year: 2023
     start_month: 1
     end_year: 2023
-    end_month: 6
+    end_month: 2
 
   - biz: future_usdt
     markets: [BTC_USDT]
     types: [trades, funding_updates]
     start_year: 2023
-    start_month: 4
+    start_month: 1
     end_year: 2023
-    end_month: 5
+    end_month: 2
 
 # 日志配置
 log_dir: ./logs

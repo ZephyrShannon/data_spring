@@ -288,27 +288,26 @@ class TicksRecord:
                     writer.writerow(snap)
 
 
-
-
-def generate_ticks(orderbook_file:Path, deals_file:Path, output_file: Path):
-    if not orderbook_file.exists():
-        print(f"❌ orderbook 文件不存在: {orderbook_file}")
+def generate_ticks(orderbook_file:str, deals_file:str, output_file:str):
+    if not Path(orderbook_file).exists():
+        print(f"orderbook 文件不存在: {orderbook_file}")
         sys.exit(1)
-    if not deals_file.exists():
-        print(f"❌ deals 文件不存在: {deals_file}")
+    if not Path(deals_file).exists():
+        print(f"deals 文件不存在: {deals_file}")
         sys.exit(1)
+    gen = TicksRecord(deals_file)
+    gen.generate(orderbook_file, output_file)
 
-    gen = TicksRecord()
-    gen.generate(orderbook_file, deals_file, output_file)
 
 def main():
     if len(sys.argv) < 4:
         raise Exception("3 args required! orderbook_file:Path, deals_file:Path, output_file:")
-        pass
-    orderbook_file = Path(sys.argv[1])
-    deals_file = Path(sys.argv[2])
-    output_file = Path(sys.argv[3])
+
+    orderbook_file = sys.argv[1]
+    deals_file = sys.argv[2]
+    output_file = sys.argv[3]
     generate_ticks(orderbook_file, deals_file, output_file)
+
 
 # ========================
 # 主函数
@@ -316,7 +315,6 @@ def main():
 if __name__ == '__main__':
     main()
     pass
-
 
 def test_main():
     orderbook_path = "/Users/zephyr/codes/alpha_spring/data_spring/data/spot/orderbooks/202305/BTC_USDT-2023050100.csv.gz"
