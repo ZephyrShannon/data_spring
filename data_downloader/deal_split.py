@@ -143,7 +143,6 @@ def preprocess_monthly_deals(monthly_file: Path, output_root: Path = None):
         cols = ['Timestamp', 'Deal_id', 'Price', 'Volume', 'Side']
         hour_chunk[cols].to_csv(filepath, index=False, sep=',', float_format='%.6f')
 
-        print(f"✅ {filepath} | {len(hour_chunk)} 条 | {start_time} ~ {end_time}")
         written_files += 1
 
     print(f"🎉 预处理完成！生成 {written_files} 个文件")
@@ -168,7 +167,7 @@ def main():
     preprocess_monthly_deals(monthly_file, output_root)
 
 if __name__ == '__main__':
-    #main()
+    main()
     pass
 
 

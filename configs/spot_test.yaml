@@ -8,6 +8,7 @@ download:
     - "candlesticks_1m"
     - "candlesticks_5m"
     - "candlesticks_1h"
+    - "candlesticks_1d"
     - "orderbooks"
   start_date: "2023-05-01 00:00"  # 开始时间（本地时间，脚本自动转为UTC）
   end_date: "2023-06-01 00:00"    # 结束时间（本地时间）

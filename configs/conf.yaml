@@ -2,19 +2,13 @@
 download:
   base_dir: "data"               # 下载根目录
   biz: ["spot"]     # 支持多个 biz
-  market: ["BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "GT_USDT", "DOGE_USDT", "XRP_USDT"] # 支持多个 market
+  market: ["BTC_USDT", "ETH_USDT"] # 支持多个 market
   types:
-    - "deals"
-    - "candlesticks_1m"
-    - "candlesticks_5m"
-    - "candlesticks_1h"
-    - "orderbooks"
-    - "orderbooks_slice"
-  start_date: "2023-04-25 00:00"  # 开始时间（本地时间，脚本自动转为UTC）
-  end_date: "2023-04-26 00:00"    # 结束时间（本地时间）
-  timezone_offset: -8              # 本地时区相对于UTC的偏移（中国为UTC+8，所以偏移是-8）
+    - "candlesticks_30s"
+  start_date: "2024-01-01 00:00"  # 开始时间（本地时间，脚本自动转为UTC）
+  end_date: "2024-02-01 00:00"    # 结束时间（本地时间）
 
 logging:
-  log_dir: "./logs"
+  log_dir: "./spot_logs"
 
-history_file: "./download_history.log"
+history_file: "./spot_history.log"

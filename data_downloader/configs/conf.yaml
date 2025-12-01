@@ -1,27 +1,18 @@
 # config.yaml
+download:
+  base_dir: "data"               # 下载根目录
+  biz: ["spot"]     # 支持多个 biz
+  market: ["BTC_USDT", "ETH_USDT"] # 支持多个 market
+  types:
+    - "deals"
+    - "candlesticks_30s"
+    - "candlesticks_1m"
+    - "candlesticks_1h"
+    - "orderbooks"
+  start_date: "2024-05-01 00:00"  # 开始时间（本地时间，脚本自动转为UTC）
+  end_date: "2025-01-01 00:00"    # 结束时间（本地时间）
 
-# 数据源和存储
-base_url: https://download.gatedata.org
-data_root: ./data
+logging:
+  log_dir: "./spot_logs"
 
-# 下载任务配置
-tasks:
-  - biz: spot
-    markets: [GT_USDT, BTC_USDT]         # 支持多个市场
-    types: [deals,  orderbooks, candlesticks_1m, candlesticks_1h, candlesticks_1d]   # 多种数据类型
-    start_year: 2023
-    start_month: 1
-    end_year: 2023
-    end_month: 2
-
-  - biz: future_usdt
-    markets: [BTC_USDT]
-    types: [trades, funding_updates]
-    start_year: 2023
-    start_month: 1
-    end_year: 2023
-    end_month: 2
-
-# 日志配置
-log_dir: ./logs
-history_file: download_history.log
+history_file: "./spot_history.log"

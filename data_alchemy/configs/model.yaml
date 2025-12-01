@@ -1,0 +1,35 @@
+# config.yaml
+model:
+  total_input_dim: 183
+  main_dim: 173
+  num_low_freq_blocks: 2
+  low_freq_block_size: 5
+  seq_len: 3600
+  router_lstm_hidden: 64
+  router_output_dim: 128
+  num_experts: 8
+  expert_lstm_hidden: 256
+  expert_lstm_layers: 2
+  expert_dropout: 0.2
+  output_targets: 10
+  test_duration_days: 3
+  val_ratio: 0.01
+
+training:
+  batch_size: 4                # M 系列芯片显存有限，建议 16 或 32
+  learning_rate: 0.001
+  num_epochs: 120
+  grad_clip: 1.0                # 梯度裁剪阈值
+  device: "auto"                # 自动选择：mps / cuda / cpu
+  interval: 60
+
+  # 学习率调度
+  lr_scheduler:
+    patience: 5
+    factor: 0.5
+    min_lr: 1e-6
+
+  # 早停（可选）
+  early_stopping:
+    patience: 10
+    min_delta: 1e-5

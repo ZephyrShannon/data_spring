@@ -4,6 +4,10 @@
 import logging
 import os
 import sys
+import time
+
+sys.path.append("/Users/zephyr/codes/alpha_spring/data_spring/data_downloader")
+
 from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
@@ -12,6 +16,7 @@ from urllib.parse import urljoin
 from deal_split import preprocess_monthly_deals
 import requests
 import yaml
+import shutil
 import recreate_ticks
 
 # 全局 Session
@@ -87,6 +92,7 @@ def parse_datetime(dt_str: str) -> datetime:
 # =============================
 TIME_GRANULARITY = {
     "deals": "monthly",
+    "candlesticks_30s": "daily",
     "candlesticks_1m": "monthly",
     "candlesticks_5m": "monthly",
     "candlesticks_1h": "monthly",
@@ -142,6 +148,8 @@ def build_url(biz: str, data_type: str, market: str, dt: datetime) -> str:
     if data_type == "orderbooks_slice":
         # 注意：我们不再从服务器下载这个，而是自己生成
         filename += f"{day}{hour}.gz"
+    elif data_type == "candlesticks_30s":
+        filename += f"{day}.csv.gz"
     elif data_type.startswith("candlesticks_"):
         filename += f".csv.gz"
     elif data_type == "deals" and biz == "spot":
@@ -166,7 +174,7 @@ class HistoryRecord:
         if Path(history_file).exists():
             with open(history_file, 'r', encoding='utf-8') as f:
                 for line in f:
-                    existing_files.add(line)
+                    existing_files.add(line.strip())
         self.existing_files = existing_files
 
     def check_if_downloaded(self, url: str):
@@ -177,26 +185,31 @@ class HistoryRecord:
             f.write(url + "\n")
         self.existing_files.add(url)
 
+import random
+def sleep_random_times(i):
+    sleep_sec = 11 * i + random.random() * 19
+    time.sleep(sleep_sec)
 
-
-def download_file(url: str, temp_path: Path) -> bool:
-    """直接下载，不支持断点续传"""
-    temp_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with SESSION.get(url, stream=True, timeout=30) as resp:
-            if resp.status_code != 200:
-                logger.warning(f"HTTP {resp.status_code}: {url}")
-                return False
-            with open(temp_path, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        logger.info(f"下载完成: {temp_path}")
-        return True
-    except Exception as e:
-        logger.error(f"下载失败 {url}: {e}")
-        temp_path.unlink(missing_ok=True)
-        return False
+def download_file(url: str, target_path: Path, retry_times = 11) -> bool:
+    # temp_path = Path(str(target_path) + ".tmp")
+    for i in range(retry_times):
+        """直接下载，不支持断点续传"""
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with SESSION.get(url, stream=True, timeout=(30, 30)) as resp:
+                if resp.status_code != 200:
+                    logger.warning(f"HTTP {resp.status_code}: {url}")
+                    sleep_random_times(i)
+                    continue
+                with open(target_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=4096):
+                        if chunk:
+                            f.write(chunk)
+            logger.info(f"下载完成: {target_path}")
+            return True
+        except Exception as e:
+            logger.error(f"下载失败 {url}: {e}, sleep now!")
+            sleep_random_times(i)
 
 
 def check_and_create_ticks(filepath: Path, dt: datetime):
@@ -211,6 +224,9 @@ def check_and_create_ticks(filepath: Path, dt: datetime):
     print(f"Recreate ticks: {filepath} + {deal_path} -> {tick_file}")
     if not tick_file.exists():
         recreate_ticks.generate_ticks(filepath, deal_path, tick_file)
+        return filepath, deal_path, tick_file
+    else:
+        return None, None, None
 
 
 def download_data(base_dir, biz_list, markets, types, start_utc, end_utc, history_file):
@@ -234,26 +250,33 @@ def download_data(base_dir, biz_list, markets, types, start_utc, end_utc, histor
         for biz in biz_list:
             for market in markets:
                 for data_type in type_list:
+                    if "candlesticks_30s" == data_type:
+                        retry = 1
+                    else:
+                        retry = 9
                     for dt in time_list:
                         url = build_url(biz, data_type, market, dt)
                         filepath = get_local_filepath(base_dir, url)
                         logger.info(f"Download {url} to {filepath}")
                         # 普通文件处理
                         in_history_file = history_file.check_if_downloaded(url)
-                        if filepath.exists() and in_history_file:
+                        if in_history_file:
                             logger.info(f"已存在或已下载，跳过: {filepath}")
-                            if not in_history_file:
-                                history_file.mark_as_downloaded(url)
+                            continue
                         else:
-                            if not download_file(url, filepath):
+                            if not download_file(url, filepath, retry_times=retry):
                                 logger.warning(f"下载失败: {url}")
                                 continue
                             else:
                                 history_file.mark_as_downloaded(url)
                         if data_type == "orderbooks":
-                            check_and_create_ticks(filepath, dt)
+                            filepath, deal_path, tick_file = check_and_create_ticks(filepath, dt)
+                            #os.remove(filepath)
                         elif data_type == "deals":
                             preprocess_monthly_deals(filepath, filepath.parent)
+                            #os.remove(filepath)
+
+
 
 
 # =====================================================
@@ -296,3 +319,13 @@ def main():
 if __name__ == "__main__":
     main()
     pass
+
+def test():
+    config_file = "/Users/zephyr/codes/alpha_spring/data_spring/configs/conf.yaml"
+    config = load_config(config_file)
+    log_dir = config.get("logging", {}).get("log_dir", "./logs")
+    logger = setup_logger(log_dir)
+    # https://download.gatedata.org/spot/candlesticks_30s/202510/BTC_USDT-20251013.csv.gz
+    download_with_config(config)
+    # https://download.gatedata.org/spot/candlesticks_30s/202401/BTC_USDT-20240104.csv.gz
+    # https://download.gatedata.org/spot/candlesticks_30s/202412/BTC_USDT-20241202.csv.gz

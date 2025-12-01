@@ -3,10 +3,17 @@
 import csv
 import datetime
 import gzip
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Generator
+
+import numpy as np
 import pandas as pd
 import sys
+import logging
+import logging
+logger = logging.getLogger("GateDownloader")  # 日志对象
+
 
 class Tick:
     def __init__(self, price: int):
@@ -109,6 +116,7 @@ class TicksRecord:
             v.trade_vol = 0
             v.order_vol = 0
             if v.cum_vol == 0:
+                # k 是price， 这个price的档位空了，则清除
                 self.buy_ticks.pop(k)
         self.updated_buy_prices.clear()
         self.updated_sell_prices.clear()
@@ -139,6 +147,9 @@ class TicksRecord:
         total_buy_order_amount = 0
         total_buy_order_vol = 0
 
+        max_price = np.nan
+        min_price = np.nan
+
         for i in range(20):
             p = ask_prices[i] if i < len(ask_prices) else 0.0
             p_float = round(p/self.precision, 10)
@@ -153,6 +164,11 @@ class TicksRecord:
                 total_sell_order_amount += (order * p_float)
                 total_sell_vol += v.trade_vol
                 total_sell_amount += v.trade_vol * p_float
+                if v.trade_vol != 0.0:
+                    if not max_price < p_float:
+                        max_price = p_float
+                    if not min_price > p_float:
+                        min_price = p_float
 
             else:
                 row[f'ask_{i}_vol'] = 0
@@ -176,6 +192,11 @@ class TicksRecord:
                 total_buy_order_amount += (order * p_float)
                 total_buy_vol += v.trade_vol
                 total_buy_amount += v.trade_vol * p_float
+                if v.trade_vol != 0.0:
+                    if not max_price < p_float:
+                        max_price = p_float
+                    if not min_price > p_float:
+                        min_price = p_float
             else:
                 row[f'bid_{i}vol'] = 0
                 row[f'bid_{i}_order'] = 0
@@ -191,11 +212,14 @@ class TicksRecord:
         row['total_sell_vol'] = total_sell_vol
         row['total_sell_amount'] = total_sell_amount
 
+        row['high'] = max_price
+        row['low'] = min_price
+
         # 清除记录
         self.reset_record()
         return row
 
-    def process_line(self, line: str) -> Optional[Dict[str, float]]:
+    def process_line(self, line: str) -> List[Dict[str, float]]:
         """
         处理 orderbook 一行
         返回: (snapshot, prev_ts, curr_ts)
@@ -203,7 +227,7 @@ class TicksRecord:
         try:
             parts = [p.strip() for p in line.split(',')]
             if len(parts) < 5:
-                return False
+                return []
 
             raw_ts = parts[0]
             ts = float(raw_ts)
@@ -211,26 +235,36 @@ class TicksRecord:
             action = parts[2]
             price = float(parts[3])
             volume = float(parts[4])
-            snapshot = None
+
+            if int(ts) == 1682899300.0:
+                return []
+
             if self.start_ts is None:
-                self.start_ts = ts
+                self.start_ts = int(ts / 3600) * 3600.0
+                if ts != self.start_ts:
+                    logger.warning(f"Found missing_ticks of {self.start_ts}")
                 self.end_ts = self.start_ts + 1
                 self.file_end_ts = ts + self.order_length
-            else:
-                if self.end_ts < ts:
-                    snapshot = self.build_top20_snapshot()
-                    self.start_ts = self.end_ts
-                    self.end_ts = self.end_ts + 1
-                if ts > self.file_end_ts:
-                    return snapshot
+            snapshot_lists = []
+            if ts > self.file_end_ts:
+                return snapshot_lists
+            if ts - self.end_ts >= 1:
+                logger.warning(f"Found missing_ticks of {self.start_ts}")
+            while self.end_ts < ts:
+                snapshot = self.build_top20_snapshot()
+                self.start_ts = self.end_ts
+                self.end_ts = self.end_ts + 1
+                snapshot_lists.append(snapshot)
+            if ts > self.file_end_ts:
+                return snapshot_lists
 
             # 更新盘口状态 & 挂单统计
             self.on_update_orderbook(side, action, price, volume)
-            return snapshot
+            return snapshot_lists
 
         except Exception as e:
-            print(f"❌ 解析失败: {line} | {e}")
-            return None
+            logger.error(f"解析失败: {line} | {e}")
+            return []
 
 
     def generate(self, orderbook_path: str, output_path: str):
@@ -250,7 +284,7 @@ class TicksRecord:
             ['total_sell_vol', 'total_sell_amount',
              'total_buy_vol', 'total_buy_amount',
              'total_sell_order_vol', 'total_sell_order_amount',
-             'total_buy_order_vol', 'total_buy_order_amount']
+             'total_buy_order_vol', 'total_buy_order_amount', "high", "low"]
         )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -258,9 +292,11 @@ class TicksRecord:
         # 打开 orderbook 文件
         open_func = gzip.open if str(orderbook_path).endswith('.gz') else open
         mode = 'rt' if str(orderbook_path).endswith('.gz') else 'r'
-
+        output_file = str(output_path)
+        if not output_file.endswith(".gz"):
+            output_file += ".gz"
         with open_func(orderbook_path, mode, encoding='utf-8') as f_ob, \
-             open(output_path, 'w', newline='', encoding='utf-8') as f_out:
+            gzip.open(output_file, 'wt', newline='', encoding='utf-8', compresslevel=6) as f_out:
 
             writer = csv.DictWriter(f_out, fieldnames=fieldnames)
             writer.writeheader()
@@ -274,18 +310,25 @@ class TicksRecord:
 
             has_header = all(h in header for h in ['Timestamp', 'Side'])
             if not has_header:
-                snap = self.process_line(header)
-                if snap:
-                    writer.writerow(snap)
+                snap_list = self.process_line(header)
+                if snap_list:
+                    for snap in snap_list:
+                        writer.writerow(snap)
 
             # 处理剩余行
             for line in f_ob:
                 if not line.strip():
                     continue
-                snap = self.process_line(line)
-                if snap:
-                    # 计算 [prev_ts, curr_ts) 内的成交
-                    writer.writerow(snap)
+                snap_list = self.process_line(line)
+                if snap_list:
+                    for snap in snap_list:
+                        writer.writerow(snap)
+            while self.file_end_ts >= self.end_ts:
+                    snap = self.build_top20_snapshot()
+                    self.start_ts = self.end_ts
+                    self.end_ts = self.end_ts + 1
+                    if snap:
+                        writer.writerow(snap)
 
 
 def generate_ticks(orderbook_file:str, deals_file:str, output_file:str):
@@ -313,14 +356,14 @@ def main():
 # 主函数
 # ========================
 if __name__ == '__main__':
-    main()
+    #main()
     pass
 
 def test_main():
+    "data/spot/ticks/202303/20230311/BTC_USDT-2023031102.csv.gz"
     orderbook_path = "/Users/zephyr/codes/alpha_spring/data_spring/data/spot/orderbooks/202305/BTC_USDT-2023050100.csv.gz"
     deals_path = "/Users/zephyr/codes/alpha_spring/data_spring/data/spot/deals/202305/20230501/BTC_USDT-2023050100.csv"
     output_path = "./ticks_test.csv"
     gen = TicksRecord(deals_path)
     gen.generate(orderbook_path, output_path)
 
-# test_main()
