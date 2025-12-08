@@ -9,8 +9,8 @@ from torch.utils.data import Dataset
 import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
-from data_downloader.data_tools import load_kline_month, load_kline_daily
-
+from data_downloader.data_tools import load_kline_month
+from factor_tools import add_low_freq_factors, add_1m_factors, add_hf_factors
 
 def get_last_month(dt_curr: datetime.datetime):
     if dt_curr.month == 1:
@@ -165,16 +165,19 @@ class TimeSeriesDataset(Dataset):
     def _get_lf_1m_seq(self, end_dt:datetime):
         # 60小时 1分钟线, 60 * 60 = 3600, 相当于2天半
         df = self.kline_1m.get_klines(end_dt)
-        return df.loc[df.index <= int(end_dt.timestamp())].iloc[-3600:]
+        with_factors = add_1m_factors(df)
+        return with_factors.loc[with_factors.index <= int(end_dt.timestamp())].iloc[-3600:]
 
-    def _get_lf_5m_seq(self, end_dt: datetime)-> pd.DataFrame:
+    def _get_lf_5m_seq(self, end_dt: datetime) -> pd.DataFrame:
         # 300 小时 5m线 12 * 300，相当于12.5天
         # 从前一天开始
         df = self.kline_5m.get_klines(end_dt)
-        return df.loc[df.index <= int(end_dt.timestamp())].iloc[-3600:]
+        with_factors = add_low_freq_factors(df)
+        return with_factors.loc[with_factors.index <= int(end_dt.timestamp())].iloc[-3600:]
 
     def __len__(self):
         return self.nr
+
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         # print(f"Get data:{idx}")
@@ -185,12 +188,15 @@ class TimeSeriesDataset(Dataset):
         dt_curr = now
         df = self.ticks_cache.get_hf_data(dt_curr)
         data_start = now - datetime.timedelta(hours=1) # 不包含
+        add_hf_factors(df)
         X_high = df.loc[(df.index > int(data_start.timestamp())) & (df.index <= int(now.timestamp()))]
+        X_high.bfill()
 
         # === 3. 获取低频特征（全部基于 now 时间点向前取历史）===
         X_low_1m = self._get_lf_1m_seq(end_dt=now)  # (3600, 3) # 有问题
         X_low_5m = self._get_lf_5m_seq(end_dt=now)  # (3600, 3) # 有问题
-        X_high = X_high.copy()
+
+
         X_high['t_of_day'] = (X_high.index % 86400) / 86400
         X_low_1m = X_low_1m.copy()
         X_low_1m['tod_1m'] = (X_low_1m.index % 86400) / 86400
@@ -206,13 +212,23 @@ class TimeSeriesDataset(Dataset):
             X_low_1m,  # (3600, 3)
             X_low_5m,  #
         ], axis=1)  # (3600, F+9)
+        columns = list(X_high.columns)
+        for col in X_low_1m.columns:
+            if not col.endswith("_1m"):
+                col = col + "_1m"
+            columns.append(col)
+        for col in X_low_5m.columns:
+            if not col.endswith("_5m"):
+                col = col + "_5m"
+            columns.append(col)
+        pd.DataFrame(data = X , columns= columns)
 
         lables = self.labels_cache.get_hf_data(now)
         y = lables.loc[lables.index == int(now.timestamp())]
 
         # === 6. 转为 Tensor ===
         x_tensor = torch.FloatTensor(X)  # (3600, total_features)
-        y_tensor = torch.FloatTensor(y.values)
+        y_tensor = torch.FloatTensor(y.values.ravel())data_loader.py
         return x_tensor, y_tensor
 
 
@@ -223,7 +239,7 @@ def load_5m_kline(data_dir: str, market: str, m: datetime.datetime)->pd.DataFram
     if os.path.exists(file_path):
         with gzip.open(file_path, 'rt') as f:
             df = pd.read_csv(f, header=None, names=KLINE_COLUMNS)
-            df.set_index('timestamp', inplace=True)
+            # df.set_index('timestamp', inplace=True)
             return df
     else:
         return load_kline_month(data_dir, market, m, 5)
@@ -314,7 +330,7 @@ class HourlyCache:
             self.cache_data_merged = pd.concat([self.cache_data_last, self.cache_data_now])
         else:
             self.cache_data_merged = self.cache_data_now.copy()
-        self.cache_data_merged = self.cache_data_merged.ffill(axis=1)
+        self.cache_data_merged = self.cache_data_merged.ffill()
         if 'high' in self.cache_data_now.columns:
             #print("ffill high and low")
             first_line_index = self.cache_data_now.index[0]
@@ -324,6 +340,20 @@ class HourlyCache:
                 self.cache_data_now.loc[first_line_index, 'low'] = self.cache_data_merged.loc[first_line_index]['low']
         return self.cache_data_merged
 
+def test_monthly_datacache():
+    data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
+    market = "BTC_USDT"
+    start_time = datetime.datetime(year=2023, month=3, day=1, tzinfo=datetime.timezone.utc)
+    end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
+    start_time = datetime.datetime(year=2024, month=1, day=1, tzinfo=datetime.timezone.utc)
+    end_time = datetime.datetime(year=2024, month=1, day=2, tzinfo=datetime.timezone.utc)
+    biz = 'spot'
+    data_type = "candlesticks_5m"
+    data_type = "candlesticks_1m"
+    mdc = MonthlyDataCache(data_dir, market, data_type)
+    dt_curr = start_time
+    mdc.get_klines(dt_curr)
+    self = mdc
 
 class MonthlyDataCache:
     def __init__(self, data_dir: str, market: str, data_type: str):
@@ -346,8 +376,7 @@ class MonthlyDataCache:
     def get_klines(self, dt_curr: datetime.datetime):
         if (self.cache_date_now is not None) and (self.cache_date_now.year == dt_curr.year) and (
                 self.cache_date_now.month == dt_curr.month):
-            if not is_last_day_of_month(dt_curr):
-                return self.cache_data_merged
+            return self.cache_data_merged
         # 需要load新的了
 
         self.cache_data_last = self.cache_data_now
@@ -365,7 +394,12 @@ class MonthlyDataCache:
             cache_data_merged = pd.concat([self.cache_data_last, self.cache_data_now])
         else:
             cache_data_merged = self.cache_data_now.copy()
-        self.cache_data_merged = cache_data_merged.shift(-1).dropna()
+        if self.data_type == "candlesticks_5m":
+            cache_data_merged['timestamp'] = cache_data_merged['timestamp'] + 300
+        else:
+            cache_data_merged['timestamp'] = cache_data_merged['timestamp'] + 60
+        cache_data_merged.set_index('timestamp', inplace=True)
+        self.cache_data_merged = cache_data_merged
         return self.cache_data_merged
 
 
@@ -382,11 +416,11 @@ def get_all_file_list(data_dir:str, biz:str, data_type:str, market:str, start_ti
         else:
             if len(time_list) != 0:
                 if len(time_list) > 1:
-                    #print(f"Add new segment:[{format_to_hours(time_list[0])}-{format_to_hours(time_list[-1])}]")
+                    print(f"Add new segment:[{format_to_hours(time_list[0])}-{format_to_hours(time_list[-1])}]")
                     file_mergable.append(TimeSeriesDataset(data_dir, market, time_list, interval, 3600))
                     time_list.clear()
                 else:
-                    # print(f"drop one hour{format_to_hours(time_list[0])}")
+                    print(f"drop one hour{format_to_hours(time_list[0])}")
         start_time = start_time + one_hour
 
     if len(time_list) != 0:
@@ -434,6 +468,9 @@ def test_file_list():
     all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, 60)
 
     ss = SegmentSets(all_list)
+    a = ss[0]
+
+test_file_list()
 
 def main():
     data_dir = "data"

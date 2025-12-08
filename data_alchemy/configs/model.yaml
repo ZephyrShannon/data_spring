@@ -5,8 +5,9 @@ model:
   num_low_freq_blocks: 2
   low_freq_block_size: 5
   seq_len: 3600
-  router_lstm_hidden: 64
-  router_output_dim: 128
+  router_lstm_hidden: 16
+  router_output_dim: 16
+  router_lstm_layers: 16
   num_experts: 8
   expert_lstm_hidden: 256
   expert_lstm_layers: 2

@@ -45,6 +45,7 @@ def test_load_month():
     end_date = "2024-01-02"
     m = datetime.datetime(year=2025,month=10,day=1)
 
+
 def load_kline_month(data_dir:str, market:str, m: datetime.datetime, interval_mins=1) -> (pd.DataFrame, int):
     if m is not None:
         file_path = build_filepath(base=data_dir, biz='spot', data_type="candlesticks_1m", market=market, dt=m)

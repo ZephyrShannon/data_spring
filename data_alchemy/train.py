@@ -6,7 +6,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import numpy as np
 import yaml
 import os, sys
-from lstm_moe_model import LSTMMoEModel
+from .lstm_moe_model import LSTMMoEModel
 from data_loader.data_loader import *  # 你已实现
 import datetime
 import csv
