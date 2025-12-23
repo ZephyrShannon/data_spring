@@ -9,9 +9,9 @@ COLUMNS = ['timestamp', 'volume', 'close', 'high', 'low', 'open']
 
 def get_next_month(dt_curr: datetime.datetime):
     if dt_curr.month == 12:
-        return datetime.datetime(year=dt_curr.year + 1, month=1, day=1)
+        return datetime.datetime(year=dt_curr.year + 1, month=1, day=1, tzinfo=dt_curr.tzinfo)
     else:
-        return datetime.datetime(year=dt_curr.year, month =dt_curr.month + 1, day=1)
+        return datetime.datetime(year=dt_curr.year, month =dt_curr.month + 1, day=1, tzinfo=dt_curr.tzinfo)
 
 def build_filepath(base: str, biz: str, data_type: str, market: str, dt: datetime) -> str:
     year = dt.strftime("%Y")
@@ -127,3 +127,24 @@ def generate_m_minute_klines(df, m_interval):
     # 如果 timestamp 列名变了，可以手动指定: resampled_df.rename(columns={'index': 'timestamp'}, inplace=True)
     resampled_df['timestamp'] = resampled_df['timestamp'].astype('datetime64[s]').astype(np.int64)
     return resampled_df
+
+
+import pandas as pd
+
+
+def find_non_consecutive_rows(df: pd.DataFrame, col: str, freq) -> pd.Index:
+    if col not in df.columns:
+        raise ValueError(f"列 '{col}' 不存在于 DataFrame 中")
+    if len(df) < 2:
+        return pd.Index([])  # 不足两行，无比较
+    diff = df[col].diff()  # 第一行 diff 为 NaN
+    mask = (diff != freq) & diff.notna()
+    return df[mask].index
+
+def find_and_report_gaps(df, col, freq):
+    bad_idx = find_non_consecutive_rows(df, col, freq)
+    for idx in bad_idx:
+        prev_val = df.loc[idx - 1, col]
+        curr_val = df.loc[idx, col]
+        gap = curr_val - prev_val
+        print(f"在索引 {idx}: 从 {prev_val} 跳到 {curr_val}, 差值 = {gap} (期望 {freq})")

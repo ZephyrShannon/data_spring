@@ -188,57 +188,50 @@ def calculate_stochastic(df: pd.DataFrame, high_col: str, low_col: str, close_co
 
     return pd.DataFrame({'%K': percent_k, '%D': percent_d})
 
+import pandas as pd
+import numpy as np
 
-def calculate_obv(df: pd.DataFrame, close_col: str, volume_col: str) -> pd.Series:
+def calculate_rolling_obv(
+    df: pd.DataFrame,
+    close_col: str,
+    volume_col: str,
+    window: int
+) -> pd.Series:
     """
-    计算能量潮指标 (On-Balance Volume)
+    计算滑动窗口内的 OBV 风格净成交量（非累计！）
 
-    数据要求:
-        - DataFrame 列: 包含 close_col, volume_col
-        - close_col (str): 收盘价列名
-        - volume_col (str): 成交量列名
-
-    前置数据要求:
-        - 需要所有历史数据以获得准确的累计值
+    参数:
+        df: 输入 DataFrame
+        close_col: 收盘价列名
+        volume_col: 成交量列名
+        window: 滑动窗口大小（整数，>=2）
 
     返回:
-        - pd.Series: OBV 值
+        pd.Series: 每个时间点对应窗口内的净 OBV 值（前 window-1 个为 NaN）
     """
-    required_cols = [close_col, volume_col]
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"缺少列: {missing_cols}")
+    if window < 2:
+        raise ValueError("window 必须 >= 2，因为需要比较前一日价格")
 
-    obv = pd.Series(index=df.index, dtype='float64')
-    obv.iloc[0] = df[volume_col].iloc[0]  # 初始化
+    if len(df) == 0:
+        return pd.Series([], dtype='float64', index=df.index)
 
-    # 使用 vectorized operations
-    price_change = df[close_col].diff()
+    close = df[close_col]
     volume = df[volume_col]
 
-    # 创建变化标志: 1 for up, -1 for down, 0 for unchanged
-    change_sign = np.sign(price_change)
-    # 如果价格不变，则不改变 OBV (保持 0，后续 cumsum 会处理)
-    # 但通常实现是价格不变时 OBV 也不变，所以我们用前一个值
-    # 这里简化处理，价格不变时 volume 不计入
+    # 1. 计算每日方向：+1, -1, 0（基于与前一日比较）
+    direction = np.where(
+        close > close.shift(1), 1,
+        np.where(close < close.shift(1), -1, 0)
+    )
 
-    # 计算每日 OBV 变化量
-    obv_change = change_sign * volume
-    # 累计求和得到 OBV
-    obv = obv_change.cumsum()
-    # 修正初始值 (如果第一个价格变化不为0，则需要调整)
-    # 更稳健的方法是从第二个开始计算，第一个单独赋值
-    # obv.iloc[0] = volume.iloc[0] if not pd.isna(volume.iloc[0]) else 0
-    # for i in range(1, len(df)):
-    #     if price_change.iloc[i] > 0:
-    #         obv.iloc[i] = obv.iloc[i-1] + volume.iloc[i]
-    #     elif price_change.iloc[i] < 0:
-    #         obv.iloc[i] = obv.iloc[i-1] - volume.iloc[i]
-    #     else:
-    #         obv.iloc[i] = obv.iloc[i-1]
-    # 上面循环太慢，用向量化替代
-    # Vectorized version seems correct based on cumsum logic.
-    return obv
+    # 2. 计算每日 OBV 贡献量（第0天无前值，设为0）
+    daily_obv_flow = direction * volume
+    daily_obv_flow.iloc[0] = 0  # 第一天无法比较，贡献为0
+
+    # 3. 滑动窗口求和（过去 window 天，包含当天）
+    rolling_obv = daily_obv_flow.rolling(window=window, min_periods=window).sum()
+
+    return rolling_obv.astype('float64')
 
 
 def calculate_atr(df: pd.DataFrame, high_col: str, low_col: str, close_col: str, window: int = 14) -> pd.Series:
@@ -269,8 +262,9 @@ def calculate_atr(df: pd.DataFrame, high_col: str, low_col: str, close_col: str,
 
     # 计算 True Range (TR)
     tr0 = high - low
-    tr1 = (high - close.shift(1)).abs()
-    tr2 = (low - close.shift(1)).abs()
+    c_shift = close.shift(1)
+    tr1 = (high - c_shift).abs()
+    tr2 = (low - c_shift).abs()
     tr = pd.DataFrame({'tr0': tr0, 'tr1': tr1, 'tr2': tr2}).max(axis=1)
 
     # 计算 ATR (使用 EMA 平滑)
@@ -300,27 +294,109 @@ def calculate_roc(df: pd.DataFrame, price_col: str, window: int) -> pd.Series:
     return roc
 
 
-def add_low_freq_factors(df: pd.DataFrame) -> pd.DataFrame:
-    ma60 = calculate_sma(df, "close", 60)
+
+def adaptive_normalize(x, window, quantile=0.9, min_scale=1e-6):
+    abs_x = x.abs()
+    # 滚动分位数
+    scale = abs_x.rolling(window=window, min_periods=window//2).quantile(quantile)
+    # 防止 scale 太小（如全零）
+    scale = np.maximum(scale, min_scale)
+    return np.clip(x / scale, -3, 3)
+
+
+def normalize_obv(obv, window=30):
+    """
+    对 OBV 进行滚动 z-score 归一化
+    """
+    # 计算滚动均值和标准差（仅历史数据）
+    ma = obv.rolling(window=window, min_periods=int(window/2)).mean()
+    std = obv.rolling(window=window, min_periods=int(window/2)).std()
+
+    # 避免除零
+    obv_norm = (obv - ma) / ((std + 1e-8) * 2)
+
+    # 裁剪极端值（保留99%分位内信息）
+    return np.clip(obv_norm, -3, 3)
+
+
+def normalize_atr_state_log(atr, window=20, low=0.25, high=4.0):
+    """
+    计算 ATR 相对状态，并进行 clip + log 缩放
+    """
+    atr_ma = atr.rolling(window=window, min_periods=1).mean()
+
+    # Step 1: 计算相对波动率（ATR / MA）
+    atr_ratio = atr / (atr_ma + 1e-8)
+
+    # Step 2: Clip 到 [low, high]
+    atr_clipped = np.clip(atr_ratio, low, high)
+
+    # Step 3: 取自然对数（log 缩放）
+    atr_log = np.log(atr_clipped)
+
+    return atr_log
+
+
+def normalize_stochastic(k_or_d): # [0，100]→ [0, 1]
+    return k_or_d * 0.01
+
+def normalize_bollinger_width(x, max_width=0.5):
+    # 经验：99% 场景下 < 0.5（50%）
+    bw_clipped = np.clip(x, 0, max_width)
+    return bw_clipped / max_width  # → [0, 1]
+
+def normalize_rsi(x):  # [0，100]→ [0, 1]
+    return x * 0.01
+
+def normalize_bollinger_width(bw, max_width=0.5):
+    # 经验：99% 场景下 < 0.5（50%）
+    bw_clipped = np.clip(bw, 0, max_width)
+    return bw_clipped / max_width  # → [0, 1]
+
+def normalize_wr(x):
+    return (x + 100) * 0.01
+    # 或映射到 [0,1]: return (df[wr_col] + 100) / 100
+
+
+def normalize_volume_rolling(vol, window=20):
+    # 方法1：滚动 z-score
+    vol_norm = (vol - vol.rolling(window).mean()) / (vol.rolling(window).std() + 1e-8)
+
+    # 方法2：更稳健——用中位数和 MAD（抗异常值）
+    # median = vol.rolling(window).median()
+    # mad = (vol - median).abs().rolling(window).median()
+    # vol_norm = (vol - median) / (mad + 1e-8)
+
+    return np.clip(vol_norm, -5, 5)
+
+def add_low_freq_factors(df: pd.DataFrame, price_factor) -> pd.DataFrame:
+    ma24 = calculate_sma(df, "close", 24)
     ma120 = calculate_sma(df, "close", 120)
     #ma250 = calculate_sma(df, "price", 250)
     macd = calculate_macd(df, "close")[["DIF","DEA"]]
-    atr60 = calculate_atr(df, "high", "low", "close", 60)
+    atr24 = calculate_atr(df, "high", "low", "close", 24)
     atr120 = calculate_atr(df, "high", "low", "close", 120)
-    obv = calculate_obv(df, "close", "volume")
-    # 12 col
-    df['ma60_5m'] = ma60
-    df['ma120_5m'] = ma120
-    df['dif_5m'] = macd['DIF']
-    df['dea_5m'] = macd['DEA']
-    #result_df['ma250'] = ma250
-    df['atr60'] = atr60
-    df['atr120'] = atr120
-    df['obv'] = obv
+    obv24 = calculate_rolling_obv(df, "close", "volume", 24)
+    obv120 = calculate_rolling_obv(df, "close", "volume", 120)
+
+    df['obv24_low'] = normalize_obv(obv24, 24)  # obv24 * df['open'] * (1 / (300 * 4))
+    df['obv120_low'] = normalize_obv(obv120, 30) #obv120 * df['open'] * (1 / (300 * 5))
+    df['volume'] = normalize_volume_rolling(df['volume'])
+
+    df['high'] = df['high'] * price_factor
+    df['close'] = df['close'] * price_factor
+    df['low'] = df['low'] * price_factor
+    df['open'] = df['open'] * price_factor
+    df['ma24_low'] = ma24 * price_factor
+    df['ma120_low'] = ma120 * price_factor
+    macd_factor = price_factor * 100 # 百分比
+    df['dif_low'] = macd['DIF'] * macd_factor
+    df['dea_low'] = macd['DEA'] * macd_factor
+    df['atr24_low'] = normalize_atr_state_log(atr24, window=20, low=0.2, high=5) # atr24 * 0.01
+    df['atr120_low'] = normalize_atr_state_log(atr120, window=20, low=0.33, high=3)
     return df
 
-
-def add_1m_factors(df:pd.DataFrame) -> pd.DataFrame:
+def add_mid_freq_factors(df:pd.DataFrame, price_factor, freq_min=1) -> pd.DataFrame:
     ma20 = calculate_sma(df, "close", 20)
     ema12 = calculate_ema(df, "close", 12)
     ema26 = calculate_ema(df, "close", 26)
@@ -329,29 +405,38 @@ def add_1m_factors(df:pd.DataFrame) -> pd.DataFrame:
     rsi = calculate_rsi(df)
     wr = calculate_williams_r(df, "high", "low", "close")
     stoch = calculate_stochastic(df, "high", "low", "close")
-    df['ma20_1m'] = ma20
-    df['ema12_1m'] = ema12
-    df['ema26_1m'] = ema26
-    df['bar_1m'] = macd['BAR']
-    df['b_up_1m'] = bolling['BB_Upper']
-    df['b_lo_1m'] = bolling['BB_Lower']
-    df['b_wd_1m'] = bolling['BB_Width']
-    df['rsi_1m'] = rsi
-    df['wr_1m'] = wr
-    df['stoc_K_1m'] = stoch['%K']
-    df['stoc_D_1m'] = stoch['%D']
+    # ['ma20_mid', 'ema12_mid', 'ema26_mid', 'b_up_mid', "b_lo_mid"]
+
+    df['ma20_mid'] = ma20 * price_factor
+    df['ema12_mid'] = ema12 * price_factor
+    df['ema26_mid'] = ema26 * price_factor
+    df['b_up_mid'] = bolling['BB_Upper'] * price_factor
+    df['b_lo_mid'] = bolling['BB_Lower'] * price_factor
+
+    df['bar_mid'] = adaptive_normalize(macd['BAR'], int(300/freq_min))
+    df['b_wd_mid'] = adaptive_normalize(bolling['BB_Width'], 30)  #normalize_bollinger_width(bolling['BB_Width'])
+    df['rsi_mid'] = normalize_rsi(rsi)
+    df['wr_mid'] = normalize_wr(wr)
+    df['stoc_K_mid'] = normalize_stochastic(stoch['%K'])
+    df['stoc_D_mid'] = normalize_stochastic(stoch['%D'])
+
+    df['volume'] = normalize_volume_rolling(df['volume'], 30)
+    df['high'] = df['high'] * price_factor
+    df['close'] = df['close'] * price_factor
+    df['low'] = df['low'] * price_factor
+    df['open'] = df['open'] * price_factor
     return df
 
 
-def add_hf_factors(df: pd.DataFrame) -> pd.DataFrame:
-    ask_roc5 = calculate_roc(df, 'ask_0_price', 5)
-    bid_roc5 = calculate_roc(df, "bid_0_price", 5)
+def add_hf_factors(df: pd.DataFrame, price_factor = 1/50000) -> pd.DataFrame:
+    ask_roc5 = calculate_roc(df, 'ask_0_price', 30)
+    bid_roc5 = calculate_roc(df, "bid_0_price", 30)
     df['ask_roc'] = ask_roc5
     df['bid_roc'] = bid_roc5
-    ask_atr = calculate_atr(df, 'high', 'low', 'ask_0_price', 15)
-    bid_atr= calculate_atr(df, 'high', 'low', 'bid_0_price', 15)
-    df['ask_atr'] = ask_atr
-    df['bid_atr'] = bid_atr
+    ask_atr = calculate_atr(df, 'high', 'low', 'ask_0_price', 30)
+    bid_atr= calculate_atr(df, 'high', 'low', 'bid_0_price', 30)
+    df['ask_atr'] = normalize_atr_state_log(ask_atr, window=20, low=0.33, high=3) # ask_atr * 50000
+    df['bid_atr'] = normalize_atr_state_log(bid_atr, window=20, low=0.33, high=3) # bid_atr * 50000
     return df
 
 
