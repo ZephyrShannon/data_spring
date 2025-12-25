@@ -6,7 +6,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import numpy as np
 import yaml
 import os, sys
-from .lstm_moe_model import LSTMMoEModel
+from data_alchemy.gru_moe_model import ThreeLayerMoE
 from data_loader.data_loader import *  # 你已实现
 import datetime
 import csv
@@ -100,27 +100,9 @@ def test_train():
     end_time = datetime.datetime.strptime(f"{end_date} 22:00:00+0000", format)
     start_train(train_cfg, model_cfg, data_dir, market, start_time, end_time)
 
-'''
-Add new segment:[2023-03-01:00-2023-03-10:16]
-Add new segment:[2023-03-10:19-2023-04-16:03]
-Add new segment:[2023-04-16:06-2023-06-10:03]
-Add new segment:[2023-06-10:05-2023-08-13:02]
-Add new segment:[2023-08-13:09-2023-12-11:00]
-Add new segment:[2023-12-11:03-2024-01-02:12]
-Add new segment:[2024-01-02:15-2024-02-20:14]
-Add new segment:[2024-02-20:16-2024-02-22:12]
-Add new segment:[2024-02-22:18-2024-04-15:01]
-Add new segment:[2024-04-15:04-2024-09-26:15]
-Add new segment:[2024-09-26:17-2024-12-04:18]
-Add new segment:[2024-12-04:21-2025-03-03:21]
-Add new segment:[2025-03-04:02-2025-06-08:20]
-Add new segment:[2025-06-08:22-2025-10-13:15]
-Add new segment:[2025-10-13:19-2025-10-31:22]
-'''
 
-
-def get_data_set(data_dir, biz, data_type, market, start_time, end_time, interval):
-    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, interval)
+def get_data_set(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len, low_type, mid_type):
+    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len=seq_len, low_type=low_type, mid_type=mid_type)
     return SegmentSets(all_list)
 
 
@@ -132,7 +114,8 @@ def start_train(train_cfg, model_cfg, data_dir, market, start_time, end_time):
     # 推荐：固定验证/测试时长（更合理），或按比例
     val_ratio = train_cfg.get('val_ratio', 0.01)
     test_ratio = train_cfg.get('test_ratio', 0.012)
-
+    low_freq_type = train_cfg.get("low_freq_type", "factor_k1h")
+    mid_freq_type = train_cfg.get("mid_freq_type", "factor_k5m")
     total_duration = end_time - start_time
 
     val_duration = total_duration * val_ratio
@@ -156,21 +139,28 @@ def start_train(train_cfg, model_cfg, data_dir, market, start_time, end_time):
     val_end = test_start
     test_end = end_time
     interval = train_cfg.get('interval', 60)
+    seq_len = model_cfg['seq_len']
+
+    prefetch = train_cfg.get('prefetch_factor', 1)
+    if prefetch == 0:
+        prefetch = None
+        num_workers = 0
+    else:
+        num_workers = 1
     # 训练集
-    train_dataset = get_data_set(data_dir, "spot", "ticks", market, train_start, train_end, interval)
-    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=0)
+    train_dataset = get_data_set(data_dir, "spot", "ticks", market, train_start, train_end, interval, seq_len, low_freq_type, mid_freq_type)
+    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 验证集（用于早停和调参）
-    val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval) #TimeSeriesDataset(data_dir, market, val_start, val_end)
-    val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=0)
+    val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval, seq_len, low_freq_type, mid_freq_type) #TimeSeriesDataset(data_dir, market, val_start, val_end)
+    val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 测试集（仅最后评估一次）
-    test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval) # TimeSeriesDataset(data_dir, market, test_start, test_end)
-    test_loader = DataLoader(test_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=0)
-
+    test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval, seq_len, low_freq_type, mid_freq_type) # TimeSeriesDataset(data_dir, market, test_start, test_end)
+    test_loader = DataLoader(test_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # Model
-    model = LSTMMoEModel(model_cfg).to(device)
+    model = ThreeLayerMoE(model_cfg).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg['learning_rate'])
     criterion = nn.MSELoss()
 
@@ -283,3 +273,5 @@ def start_train(train_cfg, model_cfg, data_dir, market, start_time, end_time):
 if __name__ == "__main__":
     pass
     #main()
+
+test_train()

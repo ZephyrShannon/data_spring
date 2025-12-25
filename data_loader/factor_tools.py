@@ -431,12 +431,18 @@ def add_mid_freq_factors(df:pd.DataFrame, price_factor, freq_min=1) -> pd.DataFr
 def add_hf_factors(df: pd.DataFrame, price_factor = 1/50000) -> pd.DataFrame:
     ask_roc5 = calculate_roc(df, 'ask_0_price', 30)
     bid_roc5 = calculate_roc(df, "bid_0_price", 30)
-    df['ask_roc'] = ask_roc5
-    df['bid_roc'] = bid_roc5
     ask_atr = calculate_atr(df, 'high', 'low', 'ask_0_price', 30)
     bid_atr= calculate_atr(df, 'high', 'low', 'bid_0_price', 30)
-    df['ask_atr'] = normalize_atr_state_log(ask_atr, window=20, low=0.33, high=3) # ask_atr * 50000
-    df['bid_atr'] = normalize_atr_state_log(bid_atr, window=20, low=0.33, high=3) # bid_atr * 50000
+
+
+    ask_atr = normalize_atr_state_log(ask_atr, window=20, low=0.33, high=3) # ask_atr * 50000
+    bid_atr = normalize_atr_state_log(bid_atr, window=20, low=0.33, high=3) # bid_atr * 50000
+    df = df.assign(
+        ask_roc = ask_roc5,
+        bid_roc = bid_roc5,
+        ask_atr = ask_atr,
+        bid_atr = bid_atr,
+    )
     return df
 
 

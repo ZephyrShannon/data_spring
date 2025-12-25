@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from typing import Tuple, List
 
-class ParallelStackedLSTM(nn.Module):
+class ParallelStackedGRU(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, num_layers: int, parallelism_factor: int, dropout: float = 0.0):
         super().__init__()
         self.input_size = input_size
@@ -17,10 +17,10 @@ class ParallelStackedLSTM(nn.Module):
         if hidden_size % parallelism_factor != 0:
             raise ValueError(f"hidden_size ({hidden_size}) must be divisible by parallelism_factor ({parallelism_factor})")
 
-        # ✅ 每个 slice 都是一个完整的、独立的多层 LSTM，接收相同的 input_size
-        self.lstm_slices = nn.ModuleList([
-            nn.LSTM(
-                input_size=input_size,          # ← 所有 slice 输入维度相同！
+        # 使用 nn.GRU 替代 nn.LSTM
+        self.gru_slices = nn.ModuleList([
+            nn.GRU(
+                input_size=input_size,
                 hidden_size=self.hidden_size_per_slice,
                 num_layers=num_layers,
                 batch_first=True,
@@ -32,84 +32,69 @@ class ParallelStackedLSTM(nn.Module):
     def forward(self, x: torch.Tensor):
         batch_size, seq_len, _ = x.shape
         slice_outputs = []
-        slice_hiddens = []
-        slice_cells = []
+        slice_hiddens = []  # GRU 只有 hidden state，没有 cell state
 
-        for lstm_slice in self.lstm_slices:
-            # ✅ 所有 slice 接收相同的 x
-            out, (hn, cn) = lstm_slice(x)
+        for gru_slice in self.gru_slices:
+            out, hn = gru_slice(x)  # ← GRU 返回 (output, hidden)，不是 (output, (h, c))
             slice_outputs.append(out)
             slice_hiddens.append(hn)
-            slice_cells.append(cn)
 
-        # 拼接：在 feature 维度（dim=2）concat
         final_output = torch.cat(slice_outputs, dim=2)      # (B, S, total_hidden)
         final_hidden = torch.cat(slice_hiddens, dim=2)      # (L, B, total_hidden)
-        final_cell = torch.cat(slice_cells, dim=2)          # (L, B, total_hidden)
 
-        return final_output, (final_hidden, final_cell)
-
+        # GRU 没有 cell state，所以只返回 hidden
+        return final_output, final_hidden  # 注意：不再返回 tuple of (h, c)
 
 class LowFreqRouter(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, parallelism_factor: int, num_experts: int):
-        super(LowFreqRouter, self).__init__()
-        self.lstm = ParallelStackedLSTM(
+        super().__init__()
+        self.gru = ParallelStackedGRU(  # ← 改名
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             parallelism_factor=parallelism_factor
         )
-        # Network to compute expert weights from the final LSTM hidden state
-        # Uses the potentially reduced effective hidden size from concatenation
-        self.router_net = nn.Linear(hidden_dim, num_experts) # hidden_dim should be adjusted if needed
+        self.router_net = nn.Linear(hidden_dim, num_experts)
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, (h_n, _) = self.lstm(x)
-        # Use the hidden state from the last layer (index -1) and last time step (squeeze if needed, but h_n is [layers, B, H])
-        # h_n shape: (num_layers, batch_size, hidden_size_total)
-        last_layer_hidden = h_n[-1] # Shape: (batch_size, hidden_size_total)
+        _, h_n = self.gru(x)  # ← 不再解包 (h, c)
+        last_layer_hidden = h_n[-1]  # (batch_size, hidden_size_total)
         weights = self.router_net(last_layer_hidden)
         return self.softmax(weights)
 
-
 class MidFreqExpert(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, parallelism_factor: int, output_dim: int):
-        super(MidFreqExpert, self).__init__()
-        self.lstm = ParallelStackedLSTM(
+        super().__init__()
+        self.gru = ParallelStackedGRU(  # ← 改名
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             parallelism_factor=parallelism_factor
         )
-        # Project LSTM output to desired intermediate output dimension
-        # Could be hidden_dim, or a different size if needed before fusion
         self.output_projection = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Get output for all timesteps
-        lstm_out, _ = self.lstm(x) # lstm_out: (batch_size, seq_len, hidden_size_total)
-        projected_out = self.output_projection(lstm_out) # (batch_size, seq_len, output_dim)
+        gru_out, _ = self.gru(x)  # ← 忽略 hidden state
+        projected_out = self.output_projection(gru_out)
         return projected_out
 
 
 class HighFreqFusion(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, parallelism_factor: int, prediction_horizon: int):
-        super(HighFreqFusion, self).__init__()
-        self.lstm = ParallelStackedLSTM(
-            input_size=input_dim, # This will be high_freq_dim + num_experts * expert_output_dim
+        super().__init__()
+        self.gru = ParallelStackedGRU(  # ← 改名
+            input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
             parallelism_factor=parallelism_factor
         )
-        # Final projection to prediction horizon
         self.predictor = nn.Linear(hidden_dim, prediction_horizon)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        lstm_out, _ = self.lstm(x) # lstm_out: (batch_size, seq_len, hidden_size_total)
-        # Typically, use the output from the last time step for final prediction
-        last_step_out = lstm_out[:, -1, :] # (batch_size, hidden_size_total)
-        prediction = self.predictor(last_step_out) # (batch_size, prediction_horizon)
+        gru_out, _ = self.gru(x)
+        last_step_out = gru_out[:, -1, :]
+        prediction = self.predictor(last_step_out)
         return prediction
 
 
@@ -122,23 +107,23 @@ class ThreeLayerMoE(nn.Module):
         # --- Layers ---
         self.router = LowFreqRouter(
             input_dim=args['low_freq_dim'],
-            hidden_dim=args['router_lstm_hidden'],
-            num_layers=args['router_lstm_layers'],
-            parallelism_factor=args['router_lstm_parallelism'],
+            hidden_dim=args['router_hidden'],
+            num_layers=args['router_layers'],
+            parallelism_factor=args['router_parallelism'],
             num_experts=args['num_experts']
         )
 
         # --- Experts ---
         # Define an output dimension for experts if different from their hidden size
         # Often, experts output their hidden state size. Let's assume that for now.
-        self.expert_output_dim = args['expert_lstm_hidden'] # Or a fixed/configurable value
+        self.expert_output_dim = args['expert_hidden'] # Or a fixed/configurable value
 
         self.experts = nn.ModuleList([
             MidFreqExpert(
                 input_dim=args['mid_freq_dim'],
-                hidden_dim=args['expert_lstm_hidden'],
-                num_layers=args['expert_lstm_layers'],
-                parallelism_factor=args['expert_lstm_parallelism'],
+                hidden_dim=args['expert_hidden'],
+                num_layers=args['expert_layers'],
+                parallelism_factor=args['expert_parallelism'],
                 output_dim=self.expert_output_dim
             ) for _ in range(args['num_experts'])
         ])
@@ -146,13 +131,13 @@ class ThreeLayerMoE(nn.Module):
         # --- Fusion ---
         # Calculate input dimension for fusion LSTM:
         # High-frequency features + weighted combination of expert outputs (each expert contributes expert_output_dim)
-        fusion_input_dim = args['high_freq_dim'] + args['num_experts'] * self.expert_output_dim
+        fusion_input_dim = args['high_freq_dim'] +  self.expert_output_dim
 
         self.fusion = HighFreqFusion(
             input_dim=fusion_input_dim,
-            hidden_dim=args['fusion_lstm_hidden'],
-            num_layers=args['fusion_lstm_layers'],
-            parallelism_factor=args['fusion_lstm_parallelism'],
+            hidden_dim=args['fusion_hidden'],
+            num_layers=args['fusion_layers'],
+            parallelism_factor=args['fusion_parallelism'],
             prediction_horizon=args['output_targets']
         )
 

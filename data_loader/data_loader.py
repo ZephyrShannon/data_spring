@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
-from factor_tools import add_hf_factors
+from data_loader.factor_tools import add_hf_factors
 
 
 def get_last_month(dt_curr: datetime.datetime):
@@ -569,9 +569,6 @@ def test_file_list():
     a = ss[111]
     a = ss[169]
     a = ss[170]
-
-
-test_file_list()
 
 
 def main():
