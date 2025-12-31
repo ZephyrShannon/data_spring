@@ -8,7 +8,7 @@ import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
 from data_downloader.data_tools import load_kline_month, get_next_month
-from factor_tools import add_low_freq_factors, add_mid_freq_factors, add_hf_factors
+from data_loader.factor_tools import add_low_freq_factors, add_mid_freq_factors, add_hf_factors
 from pathlib import Path
 
 
@@ -384,6 +384,412 @@ def get_all_file_list(data_dir: str, biz: str, data_type: str, market: str, star
     return file_mergable
 
 
+def classize_labels():
+    start_time = datetime.datetime(year=2023, month=3, day=1, tzinfo=datetime.timezone.utc)
+    end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
+    market = "BTC_USDT"
+    data_type = "labels"
+    data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
+
+    max_all = list()
+    min_all = list()
+    while start_time < end_time:
+        label_filepath = build_filepath(data_dir, "spot", data_type, market, start_time)
+        if os.path.exists(label_filepath):
+            df = pd.read_csv(label_filepath).set_index('timestamp')
+            min = df.quantile(0.025)
+            max = df.quantile(0.975)
+            max_all.append(max)
+            min_all.append(min)
+        start_time += datetime.timedelta(hours=1)
+    max_all = pd.DataFrame(max_all)
+    min_all = pd.DataFrame(min_all)
+    max_all = max_all.quantile(0.975)
+    min_all = min_all.quantile(0.025)
+    return max_all, min_all
+
+
+import pandas as pd
+import numpy as np
+
+
+def classify_dataframe_to_5_bins(df: pd.DataFrame,
+                                 max_series: pd.Series) -> pd.DataFrame:
+    """
+    将 DataFrame 中的每一列根据给定的 min 和 max 转换为 5 个等宽类别（0~4）。
+
+    Parameters:
+    ----------
+    df : pd.DataFrame
+        输入的数值型 DataFrame。
+    min_series : pd.Series
+        每列对应的最小值，索引应与 df.columns 对齐。
+    max_series : pd.Series
+        每列对应的最大值，索引应与 df.columns 对齐。
+
+    Returns:
+    -------
+    pd.DataFrame
+        与输入 df 同 shape 的整数 DataFrame，值为 0,1,2,3,4。
+        超出 [min, max] 范围的值会被 clip 到边界（即 <min → 0, >max → 4）。
+    """
+    # 确保 min_series 和 max_series 的索引与 df.columns 一致
+
+    max_series = max_series.reindex(df.columns)
+
+    # 初始化结果 DataFrame
+    result = pd.DataFrame(index=df.index, columns=df.columns, dtype='int64')
+
+    for col in df.columns:
+        col_min = min_series[col]
+        col_max = max_series[col]
+
+        if col_min >= col_max:
+            raise ValueError(f"Column '{col}': min ({col_min}) >= max ({col_max})")
+
+        # 计算每个值在 [min, max] 区间中的位置（归一化到 [0, 1)）
+        normalized = (df[col] - col_min) / (col_max - col_min)
+
+        # 将超出范围的值限制在 [0, 1]
+        normalized = np.clip(normalized, 0.0, 1.0)
+
+        # 映射到 0~4 的整数（5 个 bin）
+        # 注意：使用 floor( x * 5 )，但 1.0 会变成 5，所以先乘再取 min
+        bins = (normalized * 5).astype(int)
+        bins = np.clip(bins, 0, 4)  # 确保最大为 4
+
+        result[col] = bins
+
+    return result
+
+
+import numpy as np
+import pandas as pd
+
+
+def estimate_quantile_bins_for_5_classes(
+        min_val: float,
+        max_val: float,
+        total_samples: int,
+        histogram_counts: np.ndarray,  # shape=(200,), 第一阶段统计的各桶频数
+) -> np.ndarray:
+    """
+    基于 200 桶直方图，估算 5 等分（quintile）的边界值。
+
+    返回 6 个边界值，对应 5 个区间：
+        [bin_edges[0], bin_edges[1]) → 类别 0
+        [bin_edges[1], bin_edges[2]) → 类别 1
+        ...
+        [bin_edges[4], bin_edges[5]] → 类别 4
+
+    Parameters:
+    ----------
+    min_val : float
+        全局最小值
+    max_val : float
+        全局最大值
+    total_samples : int
+        总样本数（用于计算目标分位位置）
+    histogram_counts : np.ndarray of shape (200,)
+        每个桶的频数（通过遍历所有文件累加得到）
+
+    Returns:
+    -------
+    bin_edges : np.ndarray of shape (6,)
+        5 分类的 6 个边界值（包含 min 和 max）
+    """
+    if min_val >= max_val:
+        raise ValueError("min_val 必须 < max_val")
+    if len(histogram_counts) != 200:
+        raise ValueError("histogram_counts 必须长度为 200")
+
+    n_bins = 200
+    bin_width = (max_val - min_val) / n_bins
+    bin_edges_full = np.linspace(min_val, max_val, n_bins + 1)  # shape (201,)
+
+    # 计算累计频数
+    cumsum_counts = np.cumsum(histogram_counts)
+    total = total_samples
+
+    # 目标分位点：20%, 40%, 60%, 80%
+    target_quantiles = [0.2, 0.4, 0.6, 0.8]
+    target_positions = [int(q * total) for q in target_quantiles]
+
+    estimated_edges = [min_val]  # 起始边界
+
+    for target_pos in target_positions:
+        # 找到第一个累计频数 >= target_pos 的桶索引
+        bin_idx = np.searchsorted(cumsum_counts, target_pos, side='left')
+
+        if bin_idx >= n_bins:
+            edge_val = max_val
+        else:
+            # 线性插值估算分位点在桶内的精确位置
+            cum_before = cumsum_counts[bin_idx - 1] if bin_idx > 0 else 0
+            count_in_bin = histogram_counts[bin_idx]
+
+            if count_in_bin == 0:
+                # 如果桶为空，取桶右边界
+                edge_val = bin_edges_full[bin_idx + 1]
+            else:
+                # 插值比例
+                ratio = (target_pos - cum_before) / count_in_bin
+                edge_val = bin_edges_full[bin_idx] + ratio * bin_width
+
+            # 边界保护
+            edge_val = np.clip(edge_val, min_val, max_val)
+        estimated_edges.append(edge_val)
+    estimated_edges.append(max_val)
+    return np.array(estimated_edges)
+
+
+import pandas as pd
+import numpy as np
+
+
+def classify_signal_by_proportion(
+        choice_df: pd.DataFrame,
+        min_max_values: dict,
+        neutral_ratio: float = 0.05,  # 中性区占单侧范围的比例（如 5%）
+        strong_threshold: float = 0.35,  # 强信号起始比例（从 0 开始算，如 35%）
+        return_counts: bool = True
+) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
+    """
+    按比例对信号进行 5 分类（强卖、弱卖、中性、弱买、强买），
+    并可选返回每列各类别的样本数量。
+    """
+    if neutral_ratio >= strong_threshold:
+        raise ValueError("neutral_ratio 必须 < strong_threshold，否则弱信号区间为空")
+
+    labels_df = pd.DataFrame(index=choice_df.index, columns=choice_df.columns, dtype='int64')
+    counts = {
+        'strong_sell': pd.Series(0, index=choice_df.columns, dtype=int),
+        'weak_sell': pd.Series(0, index=choice_df.columns, dtype=int),
+        'neutral': pd.Series(0, index=choice_df.columns, dtype=int),
+        'weak_buy': pd.Series(0, index=choice_df.columns, dtype=int),
+        'strong_buy': pd.Series(0, index=choice_df.columns, dtype=int),
+    }
+
+    for col in choice_df.columns:
+        x = choice_df[col].copy()
+        col_min, col_max = min_max_values[col]
+
+        if col_min >= 0:
+            # 全为非负：无卖出信号
+            col_min = min(col_min, -col_max) if col_max > 0 else -1e-8
+        if col_max <= 0:
+            # 全为非正：无买入信号
+            col_max = max(col_max, -col_min) if col_min < 0 else 1e-8
+
+        # 单侧范围（取绝对值）
+        pos_range = col_max  # 正向最大值
+        neg_range = -col_min  # 负向最大值（正值）
+
+        # 计算阈值
+        neutral_pos = neutral_ratio * pos_range
+        neutral_neg = neutral_ratio * neg_range
+
+        strong_pos = strong_threshold * pos_range
+        strong_neg = strong_threshold * neg_range
+
+        labels = np.full(len(x), 2, dtype=np.int64)  # 默认中性
+
+        # --- 买入区域 ---
+        buy_mask = x > neutral_pos
+        if buy_mask.any():
+            weak_buy_mask = (x > neutral_pos) & (x <= strong_pos)
+            strong_buy_mask = x > strong_pos
+            labels[weak_buy_mask] = 3
+            labels[strong_buy_mask] = 4
+
+        # --- 卖出区域 ---
+        sell_mask = x < -neutral_neg
+        if sell_mask.any():
+            weak_sell_mask = (x < -neutral_neg) & (x >= -strong_neg)
+            strong_sell_mask = x < -strong_neg
+            labels[weak_sell_mask] = 1
+            labels[strong_sell_mask] = 0
+
+        labels_df[col] = labels
+
+        # 统计数量
+        unique, counts_ = np.unique(labels, return_counts=True)
+        count_dict = dict(zip(unique, counts_))
+        counts['strong_sell'][col] = count_dict.get(0, 0)
+        counts['weak_sell'][col] = count_dict.get(1, 0)
+        counts['neutral'][col] = count_dict.get(2, 0)
+        counts['weak_buy'][col] = count_dict.get(3, 0)
+        counts['strong_buy'][col] = count_dict.get(4, 0)
+
+    if return_counts:
+        return labels_df, counts
+    else:
+        return labels_df
+
+
+# ==============================
+# 主流程：你需要填充文件遍历部分
+# ==============================
+
+def compute_volatility_5_class_bins_from_files():
+    """
+    主函数：遍历所有文件，统计 200 桶直方图，然后估算 5 分类边界。
+    Parameters:
+    ----------
+    min_val, max_val : float
+        已知的全局最小/最大波动性
+    total_samples : int
+        所有文件中波动性值的总数（可预先统计）
+    file_list_or_iterator : iterable
+        文件路径列表或生成器（由你提供）
+
+    Returns:
+    -------
+    quintile_edges : np.ndarray of shape (6,)
+        5 分类的边界值
+    """
+    n_hist_bins = 200
+    # --- 第一阶段：遍历所有文件，累加直方图 ---
+    start_time = datetime.datetime(year=2023, month=3, day=1, tzinfo=datetime.timezone.utc)
+    end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
+    market = "BTC_USDT"
+    data_type = "labels"
+    data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
+
+    volatility_columns = {"volat_5m":0.148492,"volat_15m":0.225434,
+                          "volat_30m":0.407082,"volat_60m":0.725834,
+                          "volat_180m":1.782520}
+
+    all_bins = dict()
+    for col,max_val in volatility_columns.items():
+        bins = np.linspace(0, max_val, n_hist_bins + 1)
+        hist_counts = np.zeros(n_hist_bins, dtype=np.int64)
+        all_bins[col] = (bins,hist_counts)
+    total_samples = 0
+    processed_hours = 0
+    while start_time < end_time:
+        label_filepath = build_filepath(data_dir, "spot", data_type, market, start_time)
+        if os.path.exists(label_filepath):
+            df = pd.read_csv(label_filepath).set_index('timestamp')
+            total_samples += 3600
+            processed_hours += 1
+            if processed_hours % 240 == 0:
+                print(f"Processed {processed_hours}!")
+            # 示例伪代码：
+            # volatility_series = load_volatility_from_file(file_path)  # shape (n,)
+            # 必须确保 volatility_series 是 1D 数值数组，且无 NaN
+
+            # 将当前文件的波动性值分配到 200 个桶中
+            # 注意：使用 np.digitize，bins 是 201 个边界
+
+            for col_name, (bins,hist_counts) in all_bins.items():
+                volatility_series = df[col_name].values  # ←←← 你在这里填入从 file_path 读取的数据
+                # 处理边界：max_val 会落入最后一个桶
+                digitized = np.digitize(volatility_series, bins, right=False)  # 返回 1~201
+                # digitized == 0 → < min_val（应极少）
+                # digitized == 201 → == max_val（我们归入第 200 桶）
+                digitized = np.clip(digitized, 1, n_hist_bins)
+                # 转为 0-based index
+                indices = digitized - 1
+                # 累加计数
+                unique_indices, counts = np.unique(indices, return_counts=True)
+                hist_counts[unique_indices] += counts
+        start_time += datetime.timedelta(hours=1)
+
+    all_cols = dict()
+    for col_name, (bins,hist_counts) in all_bins.items():
+         # --- 第二阶段：估算 5 分位边界 ---
+        quintile_edges = estimate_quantile_bins_for_5_classes(
+            min_val=0,
+            max_val=volatility_columns[col_name],
+            total_samples=total_samples,
+            histogram_counts=hist_counts
+        )
+        all_cols[col_name] = quintile_edges
+    return all_cols
+
+'''
+ls_choice_5m      0.603769
+volat_5m          0.148492
+ls_choice_15m     1.014868
+volat_15m         0.225434
+ls_choice_30m     1.360917
+volat_30m         0.407082
+ls_choice_60m     1.745529
+volat_60m         0.725834
+ls_choice_180m    2.463534
+volat_180m        1.782520
+Name: 0.975, dtype: float64
+>>> b
+ls_choice_5m     -0.910540
+volat_5m          0.000002
+ls_choice_15m    -1.301925
+volat_15m         0.000027
+ls_choice_30m    -1.639917
+volat_30m         0.000072
+ls_choice_60m    -2.056453
+volat_60m         0.000131
+ls_choice_180m   -3.028236
+volat_180m        0.000223
+'''
+
+min_max_values = {"ls_choice_5m": (-0.910540, 0.603769),
+                  "ls_choice_15m": (-1.301925, 1.014868),
+                  "ls_choice_30m": (-1.639917, 1.360917),
+                  "ls_choice_60m": (-2.056453, 1.745529),
+                  "ls_choice_180m": (-3.028236, 2.463534)}
+
+import numpy as np
+from numpy import ndarray
+cuts = {'volat_5m': np.array([0., 0.00113779, 0.00457846, 0.01006888, 0.02020491, 0.148492]),
+        'volat_15m': np.array([0., 0.00300668, 0.01064053, 0.02218996, 0.04123717, 0.225434]),
+        'volat_30m': np.array([0., 0.00570804, 0.02069834, 0.04286237, 0.0774941,0.407082]),
+        'volat_60m': np.array([0., 0.01173768, 0.04403809, 0.08707927, 0.15255994, 0.725834]),
+        'volat_180m': np.array([0., 0.04227571, 0.14395993, 0.2652156, 0.44690631, 1.78252])}
+
+def classify_all_volatile_labels():
+    from pathlib import Path
+    start_time = datetime.datetime(year=2024, month=1, day=1, tzinfo=datetime.timezone.utc)
+    end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
+    market = "BTC_USDT"
+    data_type = "labels"
+    data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
+    choice_counts = dict()
+    while start_time < end_time:
+        label_filepath = build_filepath(data_dir, "spot", data_type, market, start_time)
+        if os.path.exists(label_filepath):
+            df = pd.read_csv(label_filepath).set_index('timestamp')
+            classified_labels = dict()
+            for col, cut_bins in cuts.items():
+                digitized = np.digitize(df[col].values, cut_bins, right=False)  # 返回 1~201
+                # digitized == 0 → < min_val（应极少）
+                # digitized == 201 → == max_val（我们归入第 200 桶）
+                digitized = np.clip(digitized, 1, 5)
+                digitized = digitized - 1
+                classified_labels[col] = digitized
+            choice_columns = ["ls_choice_5m", "ls_choice_15m", "ls_choice_30m", "ls_choice_60m", "ls_choice_180m"]
+            choice_df = df[choice_columns]
+            neutral_ratio = 0.05
+            strong_threshold: float = 0.45
+            return_counts: bool = True
+            choices, counts = classify_signal_by_proportion(choice_df, min_max_values, neutral_ratio, strong_threshold, return_counts)
+            for choice, count in counts.items():
+                existed_count = choice_counts.get(choice)
+                if existed_count is None:
+                    choice_counts[choice] = count
+                else:
+                    choice_counts[choice] = existed_count + count
+            class_lables = choices.assign(**classified_labels)
+
+            label_filepath = build_filepath(data_dir, "spot", "class_labels", market, start_time)
+            parent = Path(label_filepath).parent
+            if not parent.exists():
+                os.makedirs(parent, exist_ok=True)
+            class_lables.to_csv(label_filepath)
+        start_time += datetime.timedelta(hours=1)
+    return choice_counts
+
+
 def create_kline_data():
     start_time = datetime.datetime(year=2022, month=8, day=1, tzinfo=datetime.timezone.utc)
     end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
@@ -480,7 +886,6 @@ def find_missing_date(df: pd.DataFrame):
     print("缺失的时间点（前10个）:")
     print(missing[:10])
 
-create_kline_data()
 
 
 def main():

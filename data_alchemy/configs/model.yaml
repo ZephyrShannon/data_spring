@@ -21,11 +21,33 @@ model:
   fusion_layers: 2
   fusion_parallelism: 2
 
-  output_targets: 10
+  head_hidden: 128
+
   test_duration_days: 3
   val_ratio: 0.01
+  num_labels: 10
+  num_classes_per_label: 5
+
+class_config:
+  ls_choice:
+    5m: 5
+    15m: 5
+    30m: 5
+    60m: 5
+    180m: 5
+  volat:
+    5m: 5
+    15m: 5
+    30m: 5
+    60m: 5
+    180m: 5
+
+data:
+  batch_size: 32                    # 每个 batch 的样本数（影响内存和梯度稳定性）
+  num_workers: 0                    # DataLoader 子进程数（M 系列建议设为 0，避免 MPS 兼容问题）
 
 training:
+  seed: 1111                   # 随机种子，保证可复现性
   batch_size: 2                # M 系列芯片显存有限，建议 16 或 32
   learning_rate: 0.001
   num_epochs: 120
@@ -36,12 +58,11 @@ training:
   mid_freq_type: factor_k5m
   prefetch_factor: 0
   # 学习率调度
-  lr_scheduler:
-    patience: 5
-    factor: 0.5
-    min_lr: 1e-6
-
-  # 早停（可选）
-  early_stopping:
-    patience: 10
-    min_delta: 1e-5
+  lr: 0.0002
+  weight_decay: 0.01
+# ==========================================
+# 回调与保存
+# ==========================================
+callbacks:
+  save_dir: "checkpoints/exp_m4_v1"  # 所有输出（模型、日志、CSV、test结果）保存目录
+  patience: 10                    # 早停耐心值：验证 loss 连续 10 轮不下降则停止

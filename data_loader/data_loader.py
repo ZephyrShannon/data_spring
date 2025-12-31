@@ -151,8 +151,11 @@ class TimeSeriesDataset(Dataset):
         if is_same_hour(self.labels_cache_date, data_hour):
             # print(f"[0]Return cache of date: {self.cache_date_now}")
             return self.labels_cache.loc[dt_curr.timestamp()]
-        self.labels_cache = load_hourly_data(self.ticks_cache.data_dir, self.ticks_cache.market, data_hour, "labels")
+        self.labels_cache = load_hourly_data(self.ticks_cache.data_dir, self.ticks_cache.market, data_hour, "class_labels")
         if self.labels_cache is not None:
+            # timestamp,ls_choice_5m,ls_choice_15m,ls_choice_30m,ls_choice_60m,ls_choice_180m,volat_5m,volat_15m,volat_30m,volat_60m,volat_180m
+            columns = ['ls_choice_5m', 'volat_5m', 'ls_choice_15m', 'volat_15m', 'ls_choice_30m', 'volat_30m', 'ls_choice_60m', 'volat_60m', 'ls_choice_180m', 'volat_180m']
+            self.labels_cache = self.labels_cache[columns]
             self.labels_cache_date = data_hour
             return self.labels_cache.loc[dt_curr.timestamp()]
 
@@ -199,11 +202,14 @@ class TimeSeriesDataset(Dataset):
             print(msg)
             raise Exception(msg)
         # === 4. 拼接所有特征 ===
+        '''
+        
         X = np.concatenate([
             X_high,  # (seq_len, F)
             X_low,  # (seq_len, x)
             X_mid,  #
         ], axis=1)  # (seq_len, F+x)
+        '''
         # columns = list(X_high.columns)
         # for col in X_low.columns:
         #     if not col.endswith("_low"):
@@ -217,9 +223,11 @@ class TimeSeriesDataset(Dataset):
         y = self._get_labels(now)
 
         # === 6. 转为 Tensor ===
-        x_tensor = torch.FloatTensor(X)  # (3600, total_features)
+        x_high_tensor = torch.FloatTensor(X_high.values)
+        x_mid_tensor = torch.FloatTensor(X_mid.values)
+        x_low_tensor = torch.FloatTensor(X_low.values)
         y_tensor = torch.FloatTensor(y.values.ravel())
-        return x_tensor, y_tensor
+        return x_high_tensor, x_mid_tensor, x_low_tensor, y_tensor
 
 
 def load_hourly_data(data_dir: str, market: str, mt: datetime.datetime, data_type: str) -> pd.DataFrame:
@@ -503,7 +511,7 @@ def get_all_file_list(data_dir: str, biz: str, data_type: str, market: str, star
             time_list.append(start_time)
         else:
             if len(time_list) != 0:
-                if len(time_list) > 1:
+                if len(time_list) > 0:
                     print(f"Add new segment:[{format_to_hours(time_list[0])}-{format_to_hours(time_list[-1])}]")
                     file_mergable.append(
                         TimeSeriesDataset(data_dir, market, time_list, interval, seq_len, drop_head, mid_type,
@@ -514,7 +522,7 @@ def get_all_file_list(data_dir: str, biz: str, data_type: str, market: str, star
         start_time = start_time + one_hour
 
     if len(time_list) != 0:
-        if len(time_list) > 1:
+        if len(time_list) > 0:
             print(f"Add new segment:[{format_to_hours(time_list[0])}-{format_to_hours(time_list[-1])}]")
             file_mergable.append(
                 TimeSeriesDataset(data_dir, market, time_list, interval, seq_len, drop_head, mid_type, low_type))
@@ -570,6 +578,7 @@ def test_file_list():
     a = ss[169]
     a = ss[170]
 
+# test_file_list()
 
 def main():
     data_dir = "data"

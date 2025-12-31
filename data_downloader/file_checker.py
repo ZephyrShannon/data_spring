@@ -26,7 +26,7 @@ def build_filepath(base: str, biz: str, data_type: str, market: str, dt: datetim
         filename += ".csv.gz"
     elif data_type in ["trades", "mark_prices", "funding_applies", "funding_updates"]:
         filename += ".csv.gz"
-    elif data_type == 'labels':
+    elif data_type.endswith('labels'):
         path += f"{year}{month}{day}/"
         filename += f"{day}{hour}.csv.gz"
     elif data_type == "x_data":
