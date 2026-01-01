@@ -83,13 +83,106 @@ def export_to_onnx(model, dummy_input, filepath="model.onnx"):
 def main():
     config_file = sys.argv[1]
     config = load_config(config_file)
-    data_dir = sys.argv[2],
+    data_dir = sys.argv[2]
     market = sys.argv[3]
     start_date = sys.argv[4]
     start_time = datetime.datetime.strptime(f"{start_date} 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
     end_date = sys.argv[5]
     end_time = datetime.datetime.strptime(f"{end_date} 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
     start_train(config, data_dir, market, start_time, end_time)
+
+def test_data(config, data_dir, market, start_time, end_time):
+    train_cfg = config["training"]
+    model_cfg = config['model']
+    device = get_device()
+    print(f"使用设备: {device}")
+    total_duration = end_time - start_time
+
+    save_dir = config["callbacks"]["save_dir"]
+    os.makedirs(save_dir, exist_ok=True)
+
+    log_file = os.path.join(save_dir, "train.log")
+    csv_file = os.path.join(save_dir, "metrics.csv")
+    test_result_file = os.path.join(save_dir, "test_metrics.json")
+
+    # 推荐：固定验证/测试时长（更合理），或按比例
+    val_ratio = train_cfg.get('val_ratio', 0.01)
+    test_ratio = train_cfg.get('test_ratio', 0.012)
+    low_freq_type = train_cfg.get("low_freq_type", "factor_k1h")
+    mid_freq_type = train_cfg.get("mid_freq_type", "factor_k5m")
+    total_duration = end_time - start_time
+
+    val_duration = total_duration * val_ratio
+
+    test_duration = total_duration * test_ratio
+
+    val_duration = datetime.timedelta(seconds=int((val_duration.total_seconds()) // 3600) * 3600)
+    test_duration = datetime.timedelta(seconds=int((test_duration.total_seconds()) // 3600) * 3600)
+    max_duration = datetime.timedelta(days=7)
+    min_duration = datetime.timedelta(hours=1)
+    if val_duration > max_duration:
+        val_duration = max_duration
+    if val_duration < min_duration:
+        val_duration = min_duration
+    if test_duration > max_duration:
+        test_duration = max_duration
+    if test_duration < min_duration:
+        test_duration = min_duration
+
+    test_start = end_time - test_duration
+    val_start = test_start - val_duration
+
+    train_start = start_time
+    train_end = val_start
+    val_end = test_start
+    test_end = end_time
+    interval = train_cfg.get('interval', 60)
+    seq_len = model_cfg['seq_len']
+
+    prefetch = train_cfg.get('prefetch_factor', 1)
+    if prefetch == 0:
+        prefetch = None
+        num_workers = 0
+    else:
+        num_workers = 1
+    # 训练集
+    train_dataset = get_data_set(data_dir, "spot", "ticks", market, train_start, train_end, interval, seq_len, low_freq_type, mid_freq_type)
+
+    # 验证集（用于早停和调参）
+    val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval, seq_len, low_freq_type,
+                               mid_freq_type)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
+
+
+    # 测试集（仅最后评估一次）
+    test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval, seq_len,
+                                low_freq_type,
+                                mid_freq_type)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
+
+    print(f"Train dataset total length: {len(train_dataset)}\n")
+    for i in range(len(train_dataset)):
+        if i % 1000 == 0:
+            print(f"Test: {i}")
+        dt = train_dataset.get_item_datetime(i)
+        try:
+            train_dataset[i]
+        except Exception as e:
+            print(f"Try fetch data:[{dt}] failed")
+
+    print(f"Val_dataset total length: {len(val_dataset)}\n")
+    for i in range(len(val_dataset)):
+        dt = val_dataset.get_item_datetime(i)
+        try:
+            val_dataset[i]
+        except Exception as e:
+            print(f"Try fetch data:[{dt}] failed")
+
+    print(f"test_dataset total length: {len(test_dataset)}\n")
+    for i in range(len(test_dataset)):
+        dt = test_dataset.get_item_datetime(i)
+        try:
+            test_dataset[i]
+        except Exception as e:
+            print(f"Try fetch data:[{dt}] failed")
 
 def test_train():
     config = load_config('configs/model.yaml')
@@ -187,15 +280,18 @@ def start_train(config, data_dir, market, start_time, end_time):
     else:
         num_workers = 1
     # 训练集
-    train_dataset = get_data_set(data_dir, "spot", "ticks", market, train_start, train_end, interval, seq_len, low_freq_type, mid_freq_type)
+    print(f"Train data: {train_start}-{train_end} @ {train_cfg['batch_size']}")
+    train_dataset = get_data_set(data_dir, "spot", "class_labels", market, train_start, train_end, interval, seq_len, low_freq_type, mid_freq_type)
     train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 验证集（用于早停和调参）
-    val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval, seq_len, low_freq_type, mid_freq_type) #TimeSeriesDataset(data_dir, market, val_start, val_end)
+    print(f"Val data: {val_start}-{train_end}, interval: {interval}")
+    val_dataset = get_data_set(data_dir, "spot", "class_labels", market, val_start, val_end, interval, seq_len, low_freq_type, mid_freq_type) #TimeSeriesDataset(data_dir, market, val_start, val_end)
     val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 测试集（仅最后评估一次）
-    test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval, seq_len, low_freq_type, mid_freq_type) # TimeSeriesDataset(data_dir, market, test_start, test_end)
+    print(f"Test data: {test_start}-{test_end} seq_len: {seq_len}")
+    test_dataset = get_data_set(data_dir, "spot", "class_labels", market, test_start, test_end, interval, seq_len, low_freq_type, mid_freq_type) # TimeSeriesDataset(data_dir, market, test_start, test_end)
     test_loader = DataLoader(test_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     logging.basicConfig(

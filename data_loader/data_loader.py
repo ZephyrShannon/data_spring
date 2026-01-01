@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
-from data_loader.factor_tools import add_hf_factors
+from factor_tools import add_hf_factors
 
 
 def get_last_month(dt_curr: datetime.datetime):
@@ -452,6 +452,10 @@ def test_monthly_datacache():
     self = mdc
 
 
+def is_same_month(data_last: datetime.datetime, dt_cur: datetime.datetime) -> bool:
+    return (data_last is None) and (data_last.year == dt_cur.year) and (data_last.month == dt_cur.month)
+
+
 class MonthlyDataCache:
     def __init__(self, data_dir: str, market: str, data_type: str):
         self.cache_data_now = None
@@ -471,15 +475,20 @@ class MonthlyDataCache:
         return None
 
     def get_klines(self, dt_curr: datetime.datetime):
-        if (self.cache_date_now is not None) and (self.cache_date_now.year == dt_curr.year) and (
-                self.cache_date_now.month == dt_curr.month):
+        if is_same_month(self.cache_date_now, dt_curr):
             return self.cache_data_merged
         # 需要load新的了
-
-        self.cache_data_last = self.cache_data_now
-        self.cache_date_last = self.cache_date_now
+        last_month = get_last_month(dt_curr)
+        if is_same_hour(self.cache_data_now, last_month):
+            self.cache_data_last = self.cache_data_now
+            self.cache_date_last = self.cache_date_now
+        else:
+            self.cache_data_last = None
+            self.cache_date_last = None
         # 全新load
         self.cache_data_now = self.load_month(dt_curr)
+        if self.cache_data_now is None:
+            return None
         self.cache_date_now = dt_curr
 
         if self.cache_data_last is None:
@@ -552,7 +561,20 @@ class SegmentSets(Dataset):
         for start, end, seg in self.all_segments:
             if start <= idx < end:
                 # print(f"Get {idx - start} from seg[{start}-{end}]")
-                return seg[idx - start]
+                try:
+                    data = seg[idx - start]
+                    return data
+                except Exception as e:
+                    print(f"Failed for loading {idx}")
+                    print(f"Date: {seg.get_datetime(idx - start)}")
+                    raise e
+
+    def get_item_datetime(self, idx: int):
+        for start, end, seg in self.all_segments:
+            if start <= idx < end:
+                # print(f"Get {idx - start} from seg[{start}-{end}]")
+                return seg.get_datetime(idx - start)
+        return None
 
 
 def test_file_list():
@@ -577,8 +599,9 @@ def test_file_list():
     a = ss[111]
     a = ss[169]
     a = ss[170]
+    a = ss[0]
 
-# test_file_list()
+test_file_list()
 
 def main():
     data_dir = "data"
