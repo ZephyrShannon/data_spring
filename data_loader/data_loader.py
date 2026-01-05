@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
-from factor_tools import add_hf_factors
+from data_loader.factor_tools import add_hf_factors
 
 
 def get_last_month(dt_curr: datetime.datetime):
@@ -453,7 +453,7 @@ def test_monthly_datacache():
 
 
 def is_same_month(data_last: datetime.datetime, dt_cur: datetime.datetime) -> bool:
-    return (data_last is None) and (data_last.year == dt_cur.year) and (data_last.month == dt_cur.month)
+    return (data_last is not None) and (data_last.year == dt_cur.year) and (data_last.month == dt_cur.month)
 
 
 class MonthlyDataCache:
@@ -479,7 +479,7 @@ class MonthlyDataCache:
             return self.cache_data_merged
         # 需要load新的了
         last_month = get_last_month(dt_curr)
-        if is_same_hour(self.cache_data_now, last_month):
+        if is_same_hour(self.cache_date_now, last_month):
             self.cache_data_last = self.cache_data_now
             self.cache_date_last = self.cache_date_now
         else:
@@ -601,7 +601,7 @@ def test_file_list():
     a = ss[170]
     a = ss[0]
 
-test_file_list()
+#test_file_list()
 
 def main():
     data_dir = "data"
