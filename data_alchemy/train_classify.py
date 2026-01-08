@@ -1,24 +1,21 @@
 # train.py
+import csv
+import datetime
 import json
 import logging
-from collections import defaultdict
-from typing import Dict, Optional
+import os
+import sys
+from typing import Optional, List
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import numpy as np
 import yaml
-import os, sys
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from torch.utils.data import DataLoader
 
-from data_alchemy.gru_moe_model import ThreeLayerMoEWithClassificationHeads
+from data_alchemy.gru_moe_model import ThreeLayerMoEWithLowFreqRoutingOnly
 from data_alchemy.loss import multi_scale_classification_loss_with_details, multi_scale_classification_loss, \
     create_fixed_class_weights
 from data_loader.data_loader import *  # 你已实现
-import datetime
-import csv
-import time
+
 
 def get_device():
     if torch.backends.mps.is_available():
@@ -147,18 +144,18 @@ def test_data(config, data_dir, market, start_time, end_time):
         num_workers = 0
     else:
         num_workers = 1
+    labels = ["ls_choice_5m", "ls_choice_15m", "ls_choice_30m", "ls_choice_60m", "ls_choice_180m"]
     # 训练集
-    train_dataset = get_data_set(data_dir, "spot", "ticks", market, train_start, train_end, interval, seq_len, low_freq_type, mid_freq_type)
+    train_dataset = get_data_set(data_dir, "spot", "ticks", market, train_start, train_end, interval,
+                                 seq_len, mid_freq_type, low_freq_type, labels)
 
     # 验证集（用于早停和调参）
-    val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval, seq_len, low_freq_type,
-                               mid_freq_type)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
-
+    val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval, seq_len,
+                               mid_freq_type, low_freq_type, labels)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
 
     # 测试集（仅最后评估一次）
-    test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval, seq_len,
-                                low_freq_type,
-                                mid_freq_type)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
+    test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval,
+                                seq_len, mid_freq_type, low_freq_type, labels)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
 
     print(f"Train dataset total length: {len(train_dataset)}\n")
     for i in range(len(train_dataset)):
@@ -199,9 +196,9 @@ def test_train():
     start_train(config, data_dir, market, start_time, end_time, resume_from)
 
 
-def get_data_set(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len, low_type, mid_type):
-    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len=seq_len, low_type=low_type, mid_type=mid_type)
-    return SegmentSets(all_list)
+def get_data_set(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len, mid_type, low_type, labels):
+    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len=seq_len)
+    return SegmentSets(all_list, data_dir, market,  mid_type=mid_type, low_type=low_type, required_labels=labels)
 
 
 from typing import Dict
@@ -210,7 +207,7 @@ import torch
 def calculate_accuracy_precision_recall_per_class(
     logits: torch.Tensor,
     labels: torch.Tensor,
-    class_config: Dict
+    scales: List[str],
 ) -> Dict[str, float]:
     """
     计算每个子任务的准确率 + 每个类别的精确率和召回率
@@ -219,16 +216,15 @@ def calculate_accuracy_precision_recall_per_class(
       - {scale}_{task}_precision_cls{cls}
       - {scale}_{task}_recall_cls{cls}
     """
-    scales = ['5m', '15m', '30m', '60m', '180m']
     current_offset = 0
     result_dict = {}
 
     for i, scale in enumerate(scales):
         # ===== LS Choice =====
-        ls_classes = class_config['ls_choice'][scale]
+        ls_classes = 5  #class_config['ls_choice'][scale]
         ls_logits = logits[:, current_offset:current_offset + ls_classes]
         ls_pred = ls_logits.argmax(dim=1)
-        ls_label = labels[:, 2 * i]
+        ls_label = labels[:, i]
 
         # Accuracy
         #acc_ls = (ls_pred == ls_label).float().mean().item()
@@ -265,6 +261,7 @@ def calculate_accuracy_precision_recall_per_class(
         current_offset += ls_classes
 
         # ===== Volatility =====
+        '''
         vol_classes = class_config['volat'][scale]
         vol_logits = logits[:, current_offset:current_offset + vol_classes]
         vol_pred = vol_logits.argmax(dim=1)
@@ -291,6 +288,7 @@ def calculate_accuracy_precision_recall_per_class(
             result_dict[f"vol_{scale}_{cls}_reca"] = round(recall_cls, 6)
 
         current_offset += vol_classes
+        '''
 
     return result_dict
 
@@ -313,12 +311,15 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     # 推荐：固定验证/测试时长（更合理），或按比例
     val_ratio = train_cfg.get('val_ratio', 0.01)
     test_ratio = train_cfg.get('test_ratio', 0.012)
+
     low_freq_type = train_cfg.get("low_freq_type", "factor_k1h")
     mid_freq_type = train_cfg.get("mid_freq_type", "factor_k5m")
     total_duration = end_time - start_time
 
     val_duration = total_duration * val_ratio
     test_duration = total_duration * test_ratio
+    val_duration = datetime.timedelta(seconds=int((val_duration.total_seconds()) // 3600) * 3600)
+    test_duration = datetime.timedelta(seconds=int((test_duration.total_seconds()) // 3600) * 3600)
     max_duration = datetime.timedelta(days=7)
     min_duration = datetime.timedelta(hours=1)
     if val_duration > max_duration:
@@ -347,19 +348,28 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     else:
         num_workers = 1
     # 训练集
-    print(f"Train data: {train_start}-{train_end} @ {train_cfg['batch_size']}")
-    train_dataset = get_data_set(data_dir, "spot", "class_labels", market, train_start, train_end, interval, seq_len, low_freq_type, mid_freq_type)
-    train_loader = DataLoader(train_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
+    batch_size = train_cfg['batch_size']
+    print(f"Train data: {train_start}-{train_end} @ {batch_size}")
+    label_start = config['training'].get('label_start', 0)
+    label_end = config['training'].get('label_end', 2)
+    label_num = label_end - label_start
+    label_cols = ["ls_choice_5m","ls_choice_15m", "ls_choice_30m", "ls_choice_60m", "ls_choice_180m"][label_start:label_end]
+
+    train_dataset = get_data_set(data_dir, "spot", "class_labels", market, train_start, train_end,
+                                 interval, seq_len, mid_freq_type, low_freq_type, label_cols)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 验证集（用于早停和调参）
     print(f"Val data: {val_start}-{train_end}, interval: {interval}")
-    val_dataset = get_data_set(data_dir, "spot", "class_labels", market, val_start, val_end, interval, seq_len, low_freq_type, mid_freq_type) #TimeSeriesDataset(data_dir, market, val_start, val_end)
-    val_loader = DataLoader(val_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
+    val_dataset = get_data_set(data_dir, "spot", "class_labels", market, val_start, val_end, interval,
+                               seq_len, mid_freq_type, low_freq_type, label_cols) #TimeSeriesDataset(data_dir, market, val_start, val_end)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 测试集（仅最后评估一次）
     print(f"Test data: {test_start}-{test_end} seq_len: {seq_len}")
-    test_dataset = get_data_set(data_dir, "spot", "class_labels", market, test_start, test_end, interval, seq_len, low_freq_type, mid_freq_type) # TimeSeriesDataset(data_dir, market, test_start, test_end)
-    test_loader = DataLoader(test_dataset, batch_size=train_cfg['batch_size'], shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
+    test_dataset = get_data_set(data_dir, "spot", "class_labels", market, test_start, test_end, interval,
+                                seq_len, mid_freq_type, low_freq_type, label_cols) # TimeSeriesDataset(data_dir, market, test_start, test_end)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -371,16 +381,15 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     # === 初始化 CSV ===
     scales = ["5m", "15m", "30m", "60m", "180m"]
-    tasks = ["ls", "vol"]
-    scale_weights = [('5m', 1.0), ('15m', 0.9), ('30m', 1.1), ('60m', 1.1), ('180m', 0.9)]
-    fieldnames = (["epoch", "train_loss", "val_loss"] + [
-        f"{scale}_{task}" for scale in scales for task in tasks])
+
+    scale_names = scales[label_start:label_end]
+    fieldnames = ["epoch", "train_loss", "val_loss"] + scale_names
     for cls in range(5):
-        for scale in scales:
+        for scale in scale_names:
             fieldnames.append(f"lb_{scale}_{cls}_reca")
             fieldnames.append(f"lb_{scale}_{cls}_prec")
-            fieldnames.append(f"vol_{scale}_{cls}_reca")
-            fieldnames.append(f"vol_{scale}_{cls}_prec")
+            #fieldnames.append(f"vol_{scale}_{cls}_reca")
+            #fieldnames.append(f"vol_{scale}_{cls}_prec")
 
 
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
@@ -388,11 +397,12 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         writer.writeheader()
     # === 随机种子 ===
     torch.manual_seed(config["training"]["seed"])
-    model = ThreeLayerMoEWithClassificationHeads(
+    model = ThreeLayerMoEWithLowFreqRoutingOnly(
         low_input_dim=config["model"]["low_freq_dim"],
         mid_input_dim=config["model"]["mid_freq_dim"],
         high_input_dim=config["model"]["high_freq_dim"],
         class_config=config["class_config"],
+        n_scales=label_num,
         low_hidden=config["model"]["router_hidden"],
         low_layers=config["model"]["router_layers"],
         low_parallel=config["model"]["router_parallelism"],
@@ -432,24 +442,35 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     grad_clip = config["training"]["grad_clip"]
     class_config = config["class_config"]
     class_weights = create_fixed_class_weights()
+    class_weights = {k: v.to(device) for k, v in class_weights.items()}
+    total_batchs = (len(train_dataset) + batch_size - 1) // batch_size
+
+    break_on_debug = True
     for epoch in range(start_epoch, epochs):
         # --- Train ---
         model.train()
         total_train_loss = 0.0
+        cur_batch = 0
+        start_time = datetime.datetime.now()
         for batch in train_loader:
             x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
             optimizer.zero_grad()
             logits = model(x_low, x_mid, x_high)
-            loss = multi_scale_classification_loss(logits, labels, scale_weights=scale_weights, class_weights=class_weights)
+            loss = multi_scale_classification_loss(logits, labels, scale_names=scale_names, class_weights=class_weights)
             loss.backward()
             if grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
             total_train_loss += loss.item()
-            if os.path.exists(os.path.join(save_dir, "epoch.stop")):
+            cur_batch += 1
+            end_time = datetime.datetime.now()
+            print(f"[{cur_batch}/{total_batchs}] cost: {end_time - start_time}")
+            start_time = end_time
+
+            if break_on_debug:
                 logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
-                os.remove(os.path.join(save_dir, "epoch.stop"))  # 可选：自动清理
                 break
+
         avg_train_loss = total_train_loss / len(train_loader)
 
         # --- Validate ---
@@ -462,16 +483,20 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             for batch in val_loader:
                 x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
                 logits = model(x_low, x_mid, x_high)
-                loss, details = multi_scale_classification_loss_with_details(logits, labels, scale_weights,
+                loss, details = multi_scale_classification_loss_with_details(logits, labels, scale_names,
                                                                              class_weights=class_weights)
                 total_val_loss += loss.item()
                 # 累积 loss 和 accuracy（保持你原有逻辑）
                 for k, v in details.items():
                     all_val_details[k] = all_val_details.get(k, 0) + v
                 # 计算 accuracy
-                accs = calculate_accuracy_precision_recall_per_class(logits, labels, class_config)
+                accs = calculate_accuracy_precision_recall_per_class(logits, labels, scale_names)
                 for k, v in accs.items():
                     all_val_accuracies[k] = all_val_accuracies.get(k, 0) + v
+
+                if break_on_debug:
+                    logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
+                    break
 
         avg_val_loss = total_val_loss / len(val_loader)
 
@@ -534,7 +559,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         for batch in test_loader:
             x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
             logits = model(x_low, x_mid, x_high)
-            loss, details = multi_scale_classification_loss_with_details(logits, labels, scale_weights, class_weights=class_weights)
+            loss, details = multi_scale_classification_loss_with_details(logits, labels, scale_names, class_weights=class_weights)
             total_test_loss += loss.item()
 
             # 累积 loss
@@ -542,9 +567,13 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 all_test_details[k] = all_test_details.get(k, 0) + v
 
             # 计算 accuracy
-            accs = calculate_accuracy_precision_recall_per_class(logits, labels, class_config)
+            accs = calculate_accuracy_precision_recall_per_class(logits, labels, scale_names)
             for k, v in accs.items():
                 all_test_accuracies[k] = all_test_accuracies.get(k, 0) + v
+
+            if break_on_debug:
+                logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
+                break
 
     # 平均
     avg_test_loss = total_test_loss / len(test_loader)

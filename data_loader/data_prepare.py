@@ -410,7 +410,6 @@ def classize_labels():
 
 
 import pandas as pd
-import numpy as np
 
 
 def classify_dataframe_to_5_bins(df: pd.DataFrame,
@@ -748,17 +747,18 @@ cuts = {'volat_5m': np.array([0., 0.00113779, 0.00457846, 0.01006888, 0.02020491
         'volat_180m': np.array([0., 0.04227571, 0.14395993, 0.2652156, 0.44690631, 1.78252])}
 
 def classify_all_volatile_labels():
-    from pathlib import Path
     start_time = datetime.datetime(year=2024, month=1, day=1, tzinfo=datetime.timezone.utc)
     end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
     market = "BTC_USDT"
     data_type = "labels"
     data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
     choice_counts = dict()
+    last_time = start_time
     while start_time < end_time:
         label_filepath = build_filepath(data_dir, "spot", data_type, market, start_time)
         if os.path.exists(label_filepath):
             df = pd.read_csv(label_filepath).set_index('timestamp')
+            break
             classified_labels = dict()
             for col, cut_bins in cuts.items():
                 digitized = np.digitize(df[col].values, cut_bins, right=False)  # 返回 1~201
@@ -773,20 +773,47 @@ def classify_all_volatile_labels():
             strong_threshold: float = 0.45
             return_counts: bool = True
             choices, counts = classify_signal_by_proportion(choice_df, min_max_values, neutral_ratio, strong_threshold, return_counts)
+            #
             for choice, count in counts.items():
                 existed_count = choice_counts.get(choice)
                 if existed_count is None:
                     choice_counts[choice] = count
                 else:
                     choice_counts[choice] = existed_count + count
+
+            choice_columns = ["ls_choice_5m", "ls_choice_15m", "ls_choice_30m", "ls_choice_60m", "ls_choice_180m"]
+            choice_df = df[choice_columns]
+            neutral_ratio = 0.05
+            strong_threshold: float = 0.35
+            return_counts: bool = True
+            choices, counts = classify_signal_by_proportion(choice_df, min_max_values, neutral_ratio, strong_threshold,
+                                                            return_counts)
+
+            vol_choice_columns = list(set(df.columns) - set(choice_columns)) # ["ls_choice_5m", "ls_choice_15m", "ls_choice_30m", "ls_choice_60m", "ls_choice_180m"]
+            choice_df = df[vol_choice_columns]
+            neutral_ratio = 0.10
+            strong_threshold: float = 0.45
+            return_counts: bool = True
+            choices, counts = classify_signal_by_proportion(choice_df, min_max_values, neutral_ratio, strong_threshold,
+                                                            return_counts)
+
+            for choice, count in counts.items():
+                existed_count = choice_counts.get(choice)
+                if existed_count is None:
+                    choice_counts[choice] = count
+                else:
+                    choice_counts[choice] = existed_count + count
+
             class_lables = choices.assign(**classified_labels)
 
             label_filepath = build_filepath(data_dir, "spot", "class_labels", market, start_time)
             parent = Path(label_filepath).parent
             if not parent.exists():
                 os.makedirs(parent, exist_ok=True)
-            class_lables.to_csv(label_filepath)
+            #class_lables.to_csv(label_filepath)
         start_time += datetime.timedelta(hours=1)
+        if start_time.month != last_time.month:
+            print(f"{last_time.year}-{last_time.month}: {choice_counts}")
     return choice_counts
 
 

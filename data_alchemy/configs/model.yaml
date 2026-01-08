@@ -58,7 +58,9 @@ training:
   prefetch_factor: 0
   # 学习率调度
   lr: 0.0002
-  weight_decay: 0.01
+  weight_decay: 0.
+  label_start: 0
+  label_end: 2
 # ==========================================
 # 回调与保存
 # ==========================================
