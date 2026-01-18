@@ -1,25 +1,25 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from typing import Dict, Tuple, Optional, List
 import numpy as np
+from sklearn.metrics import accuracy_score, recall_score, f1_score
 
 all_counts = {
-    "5m": [1914733,  39699907, 17134392, 23835387, 1569181],
-    "15m": [3010278, 39972498, 8721874,  29856783, 2592167],
-    "30m": [4015274, 39536145, 5514332,  31598614, 3489235],
-    "60m": [5339170, 38460596, 3456064,  32089240, 4808530],
-    "180m": [7658287,35795872, 4238391,  30185961, 6275089],
+    "5m": [1914733, 39699907, 17134392, 23835387, 1569181],
+    "15m": [3010278, 39972498, 8721874, 29856783, 2592167],
+    "30m": [4015274, 39536145, 5514332, 31598614, 3489235],
+    "60m": [5339170, 38460596, 3456064, 32089240, 4808530],
+    "180m": [7658287, 35795872, 4238391, 30185961, 6275089],
 }
 
 all_counts_24 = {
-    "5m":   [748879,  17601981, 7110024, 10615365, 672551],
-    "15m":  [1194457, 17785457, 3337759, 13329602, 1101525],
-    "30m":  [1582353, 17597543, 1952860,  14139627, 1476417],
-    "60m":  [2142288, 17038478, 1088016,  14459609, 2020409],
-    "180m": [3167595, 15760421, 1580027,  13616038, 2624719],
+    "5m": [748879, 17601981, 7110024, 10615365, 672551],
+    "15m": [1194457, 17785457, 3337759, 13329602, 1101525],
+    "30m": [1582353, 17597543, 1952860, 14139627, 1476417],
+    "60m": [2142288, 17038478, 1088016, 14459609, 2020409],
+    "180m": [3167595, 15760421, 1580027, 13616038, 2624719],
 }
-
-
 
 
 def compute_class_weights_for_cross_entropy(counts, adjust_factor, scale="5m"):
@@ -53,6 +53,7 @@ def compute_class_weights_for_cross_entropy(counts, adjust_factor, scale="5m"):
 
     return torch.tensor(adjusted_weights, dtype=torch.float32)
 
+
 def create_fixed_class_weights(
         scales: List[str] = ['5m', '15m', '30m', '60m', '180m'],
         raw_weights: List[float] = [1.5, 1, 0.7, 1, 1.5],
@@ -85,81 +86,186 @@ def create_fixed_class_weights(
     return class_weights
 
 
-def multi_scale_classification_loss(
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        scale_names: Optional[List[str]] = None,
-        num_classes_per_task: int = 5,
-        class_weights: Optional[Dict[str, torch.Tensor]] = None,
-) -> torch.Tensor:
+
+
+def compute_focal_loss_params(
+        num_pos: int,
+        num_neg: int,
+        gamma: float = 2.0
+) -> dict:
     """
-    仅用于训练的轻量版损失函数。
-    不返回 details，不 detach，不构造 dict，最大化训练效率。
+    根据正负样本数量自动推荐 Focal Loss 参数
+
+    Args:
+        num_pos: 正样本数量
+        num_neg: 负样本数量
+        gamma: 聚焦参数，默认 2.0
+
+    Returns:
+        dict: {'alpha': float, 'gamma': float}
     """
-    current_offset = 0
-    total_loss = 0.0
+    pos_ratio = num_pos / (num_pos + num_neg)
 
-    for i,  task_name_ls in enumerate(scale_names):
-        # ==== LS Choice ====
-        ls_logits = logits[:, current_offset:current_offset + num_classes_per_task]
-        ls_label = labels[:, i].long()
-        weight_ls = class_weights.get(task_name_ls, None) if class_weights else None
-        loss = F.cross_entropy(ls_logits, ls_label, weight=weight_ls, reduction='mean')
-        total_loss += loss
-        current_offset += num_classes_per_task
+    if pos_ratio >= 0.1:
+        alpha = 0.75
+    elif pos_ratio >= 0.05:  # ～1:20
+        alpha = 0.80
+    elif pos_ratio >= 0.02:  # ～1:50
+        alpha = 0.85
+    else:
+        alpha = 0.90
 
-        # ==== Volatility ====
-        '''
-        task_name_vol = f"{scale}_vol"
-        vol_logits = logits[:, current_offset:current_offset + num_classes_per_task]
-        vol_label = labels[:, 2 * i + 1].long()
-        weight_vol = class_weights.get(task_name_vol, None) if class_weights else None
-        loss_vol = F.cross_entropy(vol_logits, vol_label, weight=weight_vol, reduction='mean')
-        total_loss += loss_vol * scale_w * vol_weight_factor
-        current_offset += num_classes_per_task
-        '''
-
-    avg_loss = total_loss / (1.5 * len(scale_names))
-    return avg_loss
+    return {"alpha": alpha, "gamma": gamma}
 
 
-def multi_scale_classification_loss_with_details(
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-        scale_names: Optional[List[str]] = None,
-        num_classes_per_task: int = 5,
-        class_weights: Optional[Dict[str, torch.Tensor]] = None,
-) -> Tuple[torch.Tensor, Dict[str, float]]:
+def compute_metrics(inputs, targets):
     """
-    用于验证/测试的详细版损失函数。
-    返回总 loss、各子任务 loss、以及每个子任务的 (logits, labels) 用于 metric 计算。
+    计算正分类的准确率、召回率和F1分数。
+
+    参数:
+    - inputs: 模型的logits (N,) 或者经过sigmoid激活后的概率值。
+    - targets: 真实标签 (N,)。
+
+    返回:
+    - 正分类的准确率、召回率和F1分数。
+    """
+    # 将logits转换为预测概率
+    probabilities = torch.sigmoid(inputs)
+    # 转换为二进制预测
+    predictions = (probabilities >= 0.5).float()
+
+    # 将张量移动到CPU并转换为numpy数组进行评估
+    predictions_np = predictions.cpu().numpy()
+    targets_np = targets.cpu().numpy()
+
+    # 计算指标
+    accuracy = accuracy_score(targets_np, predictions_np)
+    recall = recall_score(targets_np, predictions_np, pos_label=1)
+    f1 = f1_score(targets_np, predictions_np)
+
+    return accuracy, recall, f1
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.8, gamma=2.0, reduction='mean'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        # inputs: logits (N,), targets: binary labels (N,)
+        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * BCE_loss
+
+        if self.reduction == 'mean':
+            return F_loss.mean()
+        elif self.reduction == 'sum':
+            return F_loss.sum()
+        else:
+            return F_loss
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Optional, Tuple
+
+
+class MultiHeadBinaryFocalLoss(nn.Module):
+    """
+    Multi-head binary focal loss.
+
+    Each head is an independent binary classification task.
+
+    Args:
+        alphas: List[float] of length num_heads.
+                alpha for each head (weight for positive class).
+                If None, use 0.8 for all heads.
+        gamma: Focusing parameter (default=2.0)
+        reduction: 'mean' or 'sum' over all heads and samples
     """
 
-    current_offset = 0
-    total_loss = 0.0
-    loss_details = {}
+    def __init__(self, alphas: Optional[List[float]], gamma: float = 2.0, reduction: str = 'mean'):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
 
-    for i, task_name_ls in enumerate(scale_names):
-        # ==== LS Choice ====
-        ls_logits = logits[:, current_offset:current_offset + num_classes_per_task]
-        ls_label = labels[:,i].long()
-        weight_ls = class_weights.get(task_name_ls, None) if class_weights else None
-        loss_ls = F.cross_entropy(ls_logits, ls_label, weight=weight_ls, reduction='mean')
-        loss_details[task_name_ls] = loss_ls.item()
-        total_loss += loss_ls
-        current_offset += num_classes_per_task
+        if alphas is not None:
+            self.alphas = torch.tensor(alphas, dtype=torch.float32)  # (H,)
+        else:
+            raise Exception("alphas is None!") # will be handled in forward
 
-        # ==== Volatility ====
-        '''
-        task_name_vol = f"{scale}_vol"
-        vol_logits = logits[:, current_offset:current_offset + num_classes_per_task]
-        vol_label = labels[:, 2 * i + 1].long()
-        weight_vol = class_weights.get(task_name_vol, None) if class_weights else None
-        loss_vol = F.cross_entropy(vol_logits, vol_label, weight=weight_vol, reduction='mean')
-        loss_details[task_name_vol] = loss_vol.item()
-        total_loss += loss_vol * scale_w * vol_weight_factor
-        current_offset += num_classes_per_task
-        '''
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Compute multi-head binary focal loss.
 
-    avg_loss = total_loss / (1.5 * len(scale_names))
-    return avg_loss, loss_details
+        Args:
+            logits: (B, H) —— raw logits for H binary tasks
+            targets: (B, H) —— binary labels (0 or 1)
+
+        Returns:
+            Scalar loss (after reduction)
+        """
+        B, H = logits.shape
+        assert targets.shape == (B, H), f"targets shape {targets.shape} != ({B}, {H})"
+
+        # BCE loss per element (no reduction)
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')  # (B, H)
+        pt = torch.exp(-bce_loss)  # (B, H)
+
+        # Expand alphas to (1, H)
+        alpha_t = torch.full((1, H), 0.8, device=logits.device)
+
+        # Apply alpha only to positive class (standard Focal Loss formulation)
+        # Note: In binary case, alpha usually weights the positive class
+        # So we do: alpha * targets + (1 - alpha) * (1 - targets)
+        # But common practice (e.g., RetinaNet) uses alpha only on positive,
+        # and implicitly (1-alpha) on negative via complementary weighting.
+        # Here we follow the standard: alpha_t applied where target=1
+        at = alpha_t * targets + (1 - alpha_t) * (1 - targets)  # (B, H)
+
+        focal_loss = at * (1 - pt) ** self.gamma * bce_loss  # (B, H)
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+    @staticmethod
+    def compute_metrics_per_head(
+            preds: torch.Tensor,
+            targets: torch.Tensor
+    ) -> List[Tuple[float, float, float]]:
+        """
+        Compute Precision, Recall, F1 for each binary classification head.
+
+        Args:
+            preds: (B, H) —— predicted 0/1 labels
+            targets: (B, H) —— true 0/1 labels
+
+        Returns:
+            List of (precision, recall, f1) for each head (length = H)
+        """
+        B, H = preds.shape
+        assert targets.shape == (B, H)
+
+        metrics = []
+        preds = preds.bool()
+        targets = targets.bool()
+
+        for h in range(H):
+            tp = (preds[:, h] & targets[:, h]).sum().item()
+            fp = (preds[:, h] & ~targets[:, h]).sum().item()
+            fn = (~preds[:, h] & targets[:, h]).sum().item()
+
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            metrics.append((precision, recall, f1))
+
+        return metrics

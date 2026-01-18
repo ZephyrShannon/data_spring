@@ -29,17 +29,17 @@ model:
 
 class_config:
   ls_choice:
-    5m: 5
-    15m: 5
-    30m: 5
-    60m: 5
-    180m: 5
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
   volat:
-    5m: 5
-    15m: 5
-    30m: 5
-    60m: 5
-    180m: 5
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
 
 data:
   batch_size: 32                    # 每个 batch 的样本数（影响内存和梯度稳定性）
@@ -58,9 +58,12 @@ training:
   prefetch_factor: 0
   # 学习率调度
   lr: 0.0002
-  weight_decay: 0.
-  label_start: 0
-  label_end: 2
+  weight_decay: 0.001
+  label_start: 7
+  label_end: 8
+  label_type: ls1_labels
+  alphas:
+    - 0.9
 # ==========================================
 # 回调与保存
 # ==========================================

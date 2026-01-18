@@ -11,9 +11,8 @@ import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch.utils.data import DataLoader
 
-from data_alchemy.gru_moe_model import  ThreeLayerMoEWithSmartRouting
-from data_alchemy.loss import multi_scale_classification_loss_with_details, multi_scale_classification_loss, \
-    create_fixed_class_weights
+from data_alchemy.gru_moe_model_2class import ThreeLayerMoEWithSmartRouting
+from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLoss
 from data_loader.data_loader import *  # 你已实现
 
 
@@ -198,7 +197,7 @@ def test_train():
 
 def get_data_set(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len, mid_type, low_type, labels):
     all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len=seq_len)
-    return SegmentSets(all_list, data_dir, market,  mid_type=mid_type, low_type=low_type, required_labels=labels)
+    return SegmentSets(all_list, data_dir, market, label_type=data_type, mid_type=mid_type, low_type=low_type, required_labels=labels)
 
 
 from typing import Dict
@@ -293,7 +292,6 @@ def calculate_accuracy_precision_recall_per_class(
     return result_dict
 
 
-
 def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None):
     train_cfg = config["training"]
     model_cfg = config['model']
@@ -314,6 +312,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     low_freq_type = train_cfg.get("low_freq_type", "factor_k1h")
     mid_freq_type = train_cfg.get("mid_freq_type", "factor_k5m")
+    label_type = train_cfg.get('label_type', 'ls0_labels')
+    alphas = train_cfg.get("alphas")
     total_duration = end_time - start_time
 
     val_duration = total_duration * val_ratio
@@ -340,6 +340,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_end = end_time
     interval = train_cfg.get('interval', 60)
     seq_len = model_cfg['seq_len']
+    criterion = MultiHeadBinaryFocalLoss(alphas=alphas, gamma=2.0)
 
     prefetch = train_cfg.get('prefetch_factor', 1)
     if prefetch == 0:
@@ -353,21 +354,26 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     label_start = config['training'].get('label_start', 0)
     label_end = config['training'].get('label_end', 2)
     label_num = label_end - label_start
-    label_cols = ["ls_choice_5m","ls_choice_15m", "ls_choice_30m", "ls_choice_60m", "ls_choice_180m"][label_start:label_end]
+    all_cols = []
+    scales = ['1min', '3min', "5min", "15min", "30min"]
+    for test_freq in scales:
+        all_cols.append(f"long_signal_{test_freq}")
+        all_cols.append(f"short_signal_{test_freq}")
 
-    train_dataset = get_data_set(data_dir, "spot", "class_labels", market, train_start, train_end,
+    label_cols = all_cols[label_start:label_end]
+    train_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, train_start, train_end,
                                  interval, seq_len, mid_freq_type, low_freq_type, label_cols)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 验证集（用于早停和调参）
     print(f"Val data: {val_start}-{train_end}, interval: {interval}")
-    val_dataset = get_data_set(data_dir, "spot", "class_labels", market, val_start, val_end, interval,
+    val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, interval,
                                seq_len, mid_freq_type, low_freq_type, label_cols) #TimeSeriesDataset(data_dir, market, val_start, val_end)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
     # 测试集（仅最后评估一次）
     print(f"Test data: {test_start}-{test_end} seq_len: {seq_len}")
-    test_dataset = get_data_set(data_dir, "spot", "class_labels", market, test_start, test_end, interval,
+    test_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, test_start, test_end, interval,
                                 seq_len, mid_freq_type, low_freq_type, label_cols) # TimeSeriesDataset(data_dir, market, test_start, test_end)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch)
 
@@ -380,17 +386,19 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     # === 初始化 CSV ===
 
     # === 初始化 CSV ===
-    scales = ["5m", "15m", "30m", "60m", "180m"]
 
     scale_names = scales[label_start:label_end]
-    fieldnames = ["epoch", "train_loss", "val_loss"] + scale_names
-    for cls in range(5):
-        for scale in scale_names:
-            fieldnames.append(f"lb_{scale}_{cls}_reca")
-            fieldnames.append(f"lb_{scale}_{cls}_prec")
-            #fieldnames.append(f"vol_{scale}_{cls}_reca")
-            #fieldnames.append(f"vol_{scale}_{cls}_prec")
-
+    fieldnames = ["epoch", "train_loss", "val_loss"]
+    log_indies = []
+    for scale in scale_names:
+        scale_names.append(f"{scale}_prec")
+        scale_names.append(f"{scale}_reca")
+        scale_names.append(f"{scale}_f1")
+        scale_index = []
+        scale_index.append(f"{scale}_prec")
+        scale_index.append(f"{scale}_reca")
+        scale_index.append(f"{scale}_f1")
+        log_indies.append(scale_index)
 
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -463,7 +471,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             else:
                 # 从第5个epoch开始检查是否需要正则化
                 logits, reg_loss = model(x_low, x_mid, x_high, return_regularization=True)
-            loss = multi_scale_classification_loss(logits, labels, scale_names=scale_names, class_weights=class_weights)
+            loss = criterion(logits, labels)  # multi_scale_classification_loss(logits, labels, scale_names=scale_names, class_weights=class_weights)
             loss += reg_loss
             loss.backward()
             if grad_clip > 0:
@@ -485,22 +493,20 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         model.eval()
         total_val_loss = 0.0
         all_val_details = {}
-        all_val_accuracies = {}
         #collected_pred_details = defaultdict(list)
         with torch.no_grad():
             for batch in val_loader:
                 x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
                 logits = model(x_low, x_mid, x_high, return_regularization=False)
-                loss, details = multi_scale_classification_loss_with_details(logits, labels, scale_names,
-                                                                             class_weights=class_weights)
+                loss = criterion(logits, labels)
+                details = criterion.compute_metrics_per_head(logits, labels)
                 total_val_loss += loss.item()
                 # 累积 loss 和 accuracy（保持你原有逻辑）
-                for k, v in details.items():
-                    all_val_details[k] = all_val_details.get(k, 0) + v
-                # 计算 accuracy
-                accs = calculate_accuracy_precision_recall_per_class(logits, labels, scale_names)
-                for k, v in accs.items():
-                    all_val_accuracies[k] = all_val_accuracies.get(k, 0) + v
+                for i in range(len(log_indies)):
+                    scale_names = log_indies[i]
+                    scale_detail = details[i]
+                    for name,detail in zip(scale_names, scale_detail):
+                        all_val_details[name] = all_val_details.get(name, 0) + detail
 
                 if break_on_debug:
                     logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
@@ -508,15 +514,11 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
         avg_val_loss = total_val_loss / len(val_loader)
 
-        for k in all_val_accuracies:
-            all_val_accuracies[k] /= len(val_loader)
-
         log_dict = {
             "epoch": epoch + 1,
             "train_loss": round(avg_train_loss, 6),
             "val_loss": round(avg_val_loss, 6),
             **{k: v / len(test_loader) for k, v in all_val_details.items()},
-            **{k: v / len(test_loader) for k, v in all_val_accuracies.items()},
         }
 
         # 写入 CSV（确保 fieldnames 包含所有 _pred_clsX / _true_clsX）
@@ -561,28 +563,24 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     all_test_details = {}
     all_test_accuracies = {}
 
-    #collected_pred_details = defaultdict(list)  # key: task_name, value: list of (logits, labels)
-
     with torch.no_grad():
         for batch in test_loader:
             x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
             logits = model(x_low, x_mid, x_high, return_regularization = False)
-            loss, details = multi_scale_classification_loss_with_details(logits, labels, scale_names, class_weights=class_weights)
+            loss = criterion(logits, labels)
             total_test_loss += loss.item()
+            details = criterion.compute_metrics_per_head(logits, labels)
 
             # 累积 loss
-            for k, v in details.items():
-                all_test_details[k] = all_test_details.get(k, 0) + v
-
-            # 计算 accuracy
-            accs = calculate_accuracy_precision_recall_per_class(logits, labels, scale_names)
-            for k, v in accs.items():
-                all_test_accuracies[k] = all_test_accuracies.get(k, 0) + v
+            for i in range(len(log_indies)):
+                scale_names = log_indies[i]
+                scale_detail = details[i]
+                for name, detail in zip(scale_names, scale_detail):
+                    all_val_details[name] = all_val_details.get(name, 0) + detail
 
             if break_on_debug:
                 logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
                 break
-
     # 平均
     avg_test_loss = total_test_loss / len(test_loader)
     for k in all_test_details:
@@ -594,7 +592,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_metrics = {
         "test_loss": round(avg_test_loss, 6),
         "subtask_losses": {k: round(v, 6) for k, v in all_test_details.items()},
-        "subtask_accuracies": {k: round(v, 6) for k, v in all_test_accuracies.items()}
     }
 
     # 保存 JSON
@@ -609,9 +606,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     logger.info("\n📊 Subtask Losses:")
     for k, v in all_test_details.items():
         logger.info(f"  {k}: {v:.6f}")
-    logger.info("\n🎯 Subtask Accuracies:")
-    for k, v in all_test_accuracies.items():
-        logger.info(f"  {k}: {v * 100:.2f}%")
     logger.info("=" * 50)
     logger.info(f"Test results saved to: {test_result_file}")
 

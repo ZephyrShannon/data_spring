@@ -179,6 +179,7 @@ class SegmentSets(Dataset):
             all_segments: typing_extensions.List[TimeSeriesDataset],
             data_dir: str,
             market: str,
+            label_type: str,
             mid_type: str = "factor_k5m",
             low_type: str = "factor_k1h",
             required_labels=["ls_choice_5m","ls_choice_15m"]
@@ -190,6 +191,7 @@ class SegmentSets(Dataset):
         self.data_dir = data_dir
         self.market = market
         self.required_labels = required_labels
+        self.label_type = label_type
 
         # === 原有 segment 索引逻辑 ===
         self.all_segments = []
@@ -209,7 +211,7 @@ class SegmentSets(Dataset):
         if is_same_hour(self.labels_cache_date, data_hour):
             return self.labels_cache.loc[dt_curr.timestamp()]
 
-        self.labels_cache = load_hourly_data(self.data_dir, self.market, data_hour, "class_labels")
+        self.labels_cache = load_hourly_data(self.data_dir, self.market, data_hour, self.label_type)
         if self.labels_cache is not None:
             self.labels_cache = self.labels_cache[self.required_labels].copy()
             self.labels_cache_date = data_hour
@@ -279,7 +281,7 @@ class SegmentSets(Dataset):
         x_high_tensor = torch.FloatTensor(X_high.values)
         x_mid_tensor = torch.FloatTensor(X_mid.values)
         x_low_tensor = torch.FloatTensor(X_low.values)
-        y_tensor = torch.LongTensor(y.values.ravel())  # 注意：分类标签应为 LongTensor！
+        y_tensor = torch.FloatTensor(y.values.ravel())  # 注意：分类标签应为 LongTensor！ 二分类是FloatTensor
 
         return x_high_tensor, x_mid_tensor, x_low_tensor, y_tensor
 

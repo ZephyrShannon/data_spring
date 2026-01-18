@@ -933,3 +933,273 @@ def main():
     end_dt = datetime.datetime.now()
     time_cost = end_dt - start_dt
     print(f"Cost time: {time_cost}")
+
+
+import numpy as np
+from typing import Tuple, Optional
+import warnings
+
+warnings.filterwarnings('ignore')
+
+
+def calculate_future_metrics(
+        df: pd.DataFrame,
+        n_minutes: int,
+        long_ratio: float,
+        short_ratio: float,
+        future_price_col: str = 'nm_price',
+        fill_na: bool = True,
+        min_periods: int = None
+) -> pd.DataFrame:
+    """
+    计算未来n分钟的收益和风险指标
+
+    参数:
+    ----------
+    df : pd.DataFrame
+        1秒频率的DataFrame，必须包含列:
+        - total_sell_vol, total_sell_amount, total_buy_vol, total_buy_amount
+        - high, low
+        - nm_price (或指定的未来价格列)
+    n_minutes : int
+        未来时间窗口长度（分钟）
+    future_price_col : str
+        未来价格列名，用于计算收益
+    fill_na : bool
+        是否填充NaN值
+    min_periods : int
+        滑动窗口最小观测数，None表示需要全部n*60个观测
+
+    返回:
+    ----------
+    pd.DataFrame
+        添加了以下列的原始DataFrame:
+        - price: 当前价格
+        - max_high_nmin: 未来n分钟的最高价的最高值
+        - min_high_nmin: 未来n分钟的最高价的最低值
+        - max_low_nmin: 未来n分钟的最低价的最低值
+        - min_low_nmin: 未来n分钟的最低价的最低值
+        - future_return: 未来n分钟收益率
+        - risk_rate: 风险率
+        - long_signal: 做多信号 (如果未来收益率>0)
+        - short_signal: 做空信号 (如果未来收益率<0)
+    """
+
+    # 创建副本，避免修改原始数据
+    df = df.copy()
+    # 参数验证
+    required_cols = ['total_sell_vol', 'total_sell_amount',
+                     'total_buy_vol', 'total_buy_amount', 'high', 'low']
+
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"DataFrame缺少必要列: {missing_cols}")
+
+    # 1. 计算当前价格
+    df['price'] = (df['total_sell_amount'] + df['total_buy_amount']) / \
+                  (df['total_sell_vol'] + df['total_buy_vol'])
+
+    # 2. 处理NaN值
+    if fill_na:
+        # 前向填充，然后后向填充
+        df['price'] = df['price'].ffill().bfill()
+        df['high'] = df['high'].ffill().bfill()
+        df['low'] = df['low'].ffill().bfill()
+        df[future_price_col] = df['price'].shift(-1)
+
+    # 3. 计算未来n分钟的窗口大小（1秒频率 → n*60秒）
+    window_size = n_minutes * 60
+
+    # 设置最小观测数
+    if min_periods is None:
+        min_periods = window_size  # 默认需要完整窗口
+
+    # 4. 计算未来n分钟的高低价统计
+    # 注意：使用.shift(-1)因为下一行开仓
+    # max_high_nmin: 未来n分钟的最高价的最高值
+    df['max_high_nmin'] = df['high'].shift(-1).rolling(
+        window=window_size, min_periods=min_periods
+    ).max()
+
+    reversed_max = df['high'].shift(-1)[::-1].rolling(window=window_size, min_periods=min_periods).max()[::-1]
+    df['max_high_nmin'] = reversed_max
+
+
+    # min_high_nmin: 未来n分钟的最高价的最低值
+    df['min_high_nmin'] = df['high'].shift(-1)[::-1].rolling(
+        window=window_size, min_periods=min_periods
+    ).min()[::-1]
+
+    # max_low_nmin: 未来n分钟的最低价的最低值
+    df['max_low_nmin'] = df['low'].shift(-1)[::-1].rolling(
+        window=window_size, min_periods=min_periods
+    ).max()[::-1]
+
+    # min_low_nmin: 未来n分钟的最低价的最低值
+    df['min_low_nmin'] = df['low'].shift(-1)[::-1].rolling(
+        window=window_size, min_periods=min_periods
+    ).min()[::-1]
+
+    # 5. 计算未来n分钟后的价格（用于计算收益）
+    # 获取未来n分钟后的价格（窗口结束时的价格）
+    df['future_price_nmin'] = df[future_price_col].shift(-window_size)
+
+    # 6. 计算收益率
+    # 使用下一行的开仓价和n分钟后的清仓价
+    df['future_return'] = (df['future_price_nmin'] - df['price'].shift(-1)) / df['price'].shift(-1)
+
+    # 7. 计算风险率
+    df['risk_rate'] = np.nan
+
+    # 当收益率为正时（做多），风险率 = (开仓价 - 期间最低价) / 开仓价
+    long_mask = df['future_return'] >= 0
+    if long_mask.any():
+        # 开仓价
+        entry_price = df['price'].shift(-1)
+        # 期间最低价是low的最小值
+        min_low = df['min_low_nmin']
+        df.loc[long_mask, 'risk_rate'] = (entry_price[long_mask] - min_low[long_mask]) / entry_price[long_mask]
+
+    # 当收益率为负时（做空），风险率 = (期间最高价 - 开仓价) / 开仓价
+    short_mask = df['future_return'] < 0
+    if short_mask.any():
+        entry_price = df['price'].shift(-1)
+        max_high = df['max_high_nmin']
+        df.loc[short_mask, 'risk_rate'] = (max_high[short_mask] - entry_price[short_mask]) / entry_price[short_mask]
+
+    # 8. 生成交易信号
+    df['long_signal'] = (df['future_return'] >= long_ratio).astype(int)
+    df['short_signal'] = (df['future_return'] <= short_ratio).astype(int)
+
+    # 9. 添加风险收益比
+    df['risk_return_ratio'] = abs(df['risk_rate'] / (df['future_return'] + 1e-10))
+    df['long_signal'][df['risk_return_ratio'] > 0.6] = 0
+    df['short_signal'][df['risk_return_ratio'] > 0.6] = 0
+    # 10. 清理临时列
+    df.drop(['future_price_nmin'], axis=1, inplace=True)
+
+    return df
+
+
+def calculate_metrics_for_multiple_windows(
+        df: pd.DataFrame,
+        windows: list = [1, 3, 5, 10, 15, 30],
+        future_price_col: str = 'nm_price',
+        open_ratio:float = 0.01
+) -> pd.DataFrame:
+    """
+    为多个时间窗口计算未来指标
+
+    参数:
+    ----------
+    df : pd.DataFrame
+        原始数据
+    windows : list
+        时间窗口列表（分钟）
+    future_price_col : str
+        未来价格列名
+
+    返回:
+    ----------
+    pd.DataFrame
+        包含所有窗口指标的DataFrame
+    """
+    result_df = pd.DataFrame(index=df.index) # df.copy()
+
+    for n_min in windows:
+        #print(f"计算 {n_min} 分钟窗口指标...")
+        valve = open_ratio * n_min / 30
+        temp_df = calculate_future_metrics(
+            df=df,
+            n_minutes=n_min,
+            long_ratio=valve,
+            short_ratio=-valve,
+            future_price_col=future_price_col,
+            fill_na=True,
+            min_periods=None
+        )
+
+        suffix = f"_{n_min}min"
+        new_cols = ['long_signal','short_signal']
+        for col in new_cols:
+            new_col_name = f"{col}{suffix}"
+            result_df[new_col_name] = temp_df[col]
+
+    return result_df
+
+
+def get_ticks(base_dir: str,  dt: datetime.datetime, market_type: str) -> Optional[pd.DataFrame]:
+    """
+    读取某小时的1s数据
+    data_type: "feature" 或 "target"
+    dt: 精确到小时（minute=0, second=0）
+    返回 (3600, feature_dim)
+    """
+    file_path = build_filepath(base_dir, "spot", "ticks", market_type, dt)
+    if os.path.exists(file_path):
+        df = pd.read_csv(file_path, sep=',', compression='gzip')
+        df['timestamp'] = df['timestamp'].astype(np.int64)
+        df = df.set_index("timestamp")
+        return df
+    else:
+        return None
+
+def calculate_lables(dt: datetime.datetime, base_dir, market_type, valve):
+    hf = get_ticks(base_dir, dt, market_type)
+    if hf is None:
+        return None
+    next_hour = dt + datetime.timedelta(hours=1)
+    next_hf = get_ticks(base_dir, next_hour, market_type)
+    if next_hf is None:
+        return None
+    all_data = pd.concat([hf, next_hf], axis=0)
+    df = all_data
+    all_labels = calculate_metrics_for_multiple_windows(df, open_ratio=valve)
+    return all_labels.loc[dt.timestamp(): next_hour.timestamp()].dropna().copy()
+
+def test_cal_labels(base_dir = 'data', ratio=0.006, label_prefix="ls1"):
+    dt_start = datetime.datetime(year=2023, month=3, day=1, tzinfo=datetime.timezone.utc)
+    dt_end = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
+    #dt_start = datetime.datetime(year=2024, month=1, day=1, hour=19, tzinfo=datetime.timezone.utc)
+    total_sum = None
+    batch_sum = None
+    total_num = 0
+    market_type = "BTC_USDT"
+    all_sums = dict()
+    label_name = f"{label_prefix}_labels"
+    while dt_start < dt_end:
+        labels = calculate_lables(dt_start, base_dir, market_type, ratio)
+        file_path = build_filepath(base_dir, "spot", label_name, market_type, dt_start)
+
+        if labels is not None:
+            p_path = Path(file_path).parent
+            if not p_path.exists():
+                #print(f"Create dir: {p_path}")
+                os.makedirs(p_path)
+            labels.to_csv(file_path)
+
+            total_num += 1
+            sum_data = labels.sum()
+            all_sums[dt_start] = sum_data.copy()
+            if total_sum is None:
+                total_sum = sum_data
+            else:
+                total_sum += sum_data
+            if batch_sum is None:
+                batch_sum = sum_data
+            else:
+                batch_sum += sum_data
+            if total_num % 168 == 0:
+                print(f"{dt_start} [{total_num}]: {total_sum / total_num}")
+                print(f"{batch_sum/168}")
+                batch_sum = None
+        dt_start += datetime.timedelta(hours=1)
+    sum_df = pd.DataFrame(all_sums).T
+    sum_df.index.name = 'datetime'
+    sum_df = sum_df.reset_index()
+    sum_record = f"{base_dir}/spot/{label_name}/stat.csv"
+    sum_df.to_csv(sum_record, index=False)
+    total_sum /= total_num
+    return total_sum, total_num
+
+ratio_names = [(0.01,'ls0'),(0.008,'ls1'),(0.006,'ls2'),(0.005,'ls3'),(0.004,'ls4'),(0.003,'ls5')]

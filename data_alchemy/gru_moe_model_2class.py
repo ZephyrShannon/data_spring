@@ -310,8 +310,8 @@ class LowFreqDualPathEncoder(nn.Module):
 
         # 计算分布熵（衡量均衡程度）
         # 避免log(0)
-        epsilon = 1e-10
-        safe_usage = usage_ratio + epsilon
+        #epsilon = 1e-10
+        safe_usage = usage_ratio + 1e-10
         entropy = -torch.sum(safe_usage * torch.log(safe_usage)) / torch.log(torch.tensor(self.num_experts))
 
         # 检查是否有专家死亡
@@ -384,17 +384,18 @@ class LowFreqDualPathEncoder(nn.Module):
         print("=" * 40)
 
 
-
 class MultiScaleClassificationHeads(nn.Module):
     def __init__(
         self,
         mf_dim: int,
         hf_dim: int,
+        class_config: Dict[str, Dict[str, int]],
         scales: List[str],
         hidden_dim: int = 128
     ):
         super().__init__()
         self.scales = scales
+        self.class_config = class_config
         self.hf_pooler = AdditiveAttention(hf_dim)
 
         # 🔥 关键：fusion only from mf + hf
@@ -404,7 +405,7 @@ class MultiScaleClassificationHeads(nn.Module):
             scale: nn.Sequential(
                 nn.Linear(self.fusion_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, 1) # Long choice
+                nn.Linear(hidden_dim, 1) # 只有一个
             ) for scale in self.scales
         })
 
@@ -448,8 +449,8 @@ class ThreeLayerMoEWithSmartRouting(nn.Module):
         super().__init__()
 
         # Validate and select scales
-        all_scales = ['1m', '3m', '5m', '15m', '30m']
-        self.scales_to_predict = all_scales[start_scale:end_scale]
+        all_scales = ['1m', '3m', '5m', '15m', '30m', '60m', '180m']
+        self.scales_to_predict = all_scales[int(start_scale/2):int((end_scale+1)/2)]
 
         # === Low-freq encoder with improved routing ===
         self.low_freq_encoder = LowFreqDualPathEncoder(

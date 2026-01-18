@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 
 # ==============================
@@ -141,7 +141,7 @@ class LowFreqDualPathEncoder(nn.Module):
         # Router head: from GRU's last hidden state (not pooled!)
         self.router_head = nn.Linear(hidden_dim, num_experts)
 
-    def forward(self, x_low: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x_low: torch.Tensor) -> torch.Tensor:
         """
         Returns:
             lf_context: (B, hidden_dim) — for classification heads
@@ -149,66 +149,57 @@ class LowFreqDualPathEncoder(nn.Module):
         """
         seq_out, _ = self.gru(x_low)  # (B, T, H)
 
-        # Branch A: Pooled context for direct feature
-        lf_context, _ = self.pooler(seq_out)  # (B, H)
-
         # Branch B: Use LAST time step of GRU output for routing
         # (Alternative: use seq_out.mean(dim=1) for global average)
         last_hidden = seq_out[:, -1, :]  # (B, H)
         router_logits = self.router_head(last_hidden)  # (B, E)
         expert_weights = F.softmax(router_logits, dim=-1)
 
-        return lf_context, expert_weights
+        return expert_weights
 
-
-# ==============================
-# 7. MultiScaleClassificationHeads (增强版：接收 lf_context)
-# ==============================
 class MultiScaleClassificationHeads(nn.Module):
     def __init__(
         self,
         mf_dim: int,
         hf_dim: int,
-        lf_dim: int,                      # ← 新增
         class_config: Dict[str, Dict[str, int]],
+        scales: List[str],
         hidden_dim: int = 128
     ):
         super().__init__()
-        self.scales = ['5m', '15m', '30m', '60m', '180m']
+        self.scales = scales
         self.class_config = class_config
         self.hf_pooler = AdditiveAttention(hf_dim)
 
-        # Total fusion dimension
-        self.fusion_dim = mf_dim + hf_dim + lf_dim  # ← 包含低频直接特征
+        # 🔥 关键：fusion only from mf + hf
+        self.fusion_dim = mf_dim + hf_dim
 
-        # Heads now take fused context
         self.heads = nn.ModuleDict({
             scale: nn.Sequential(
                 nn.Linear(self.fusion_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_dim, class_config['ls_choice'][scale] + class_config['volat'][scale])
+                nn.Linear(hidden_dim, class_config['ls_choice'][scale])
             ) for scale in self.scales
         })
 
     def forward(
         self,
         mf_context: torch.Tensor,
-        hf_seq: torch.Tensor,
-        lf_context: torch.Tensor          # ← 新增输入
+        hf_seq: torch.Tensor
     ) -> torch.Tensor:
-        hf_context, _ = self.hf_pooler(hf_seq)  # (B, hf_dim)
-        fused = torch.cat([mf_context, hf_context, lf_context], dim=-1)  # (B, fusion_dim)
+        hf_context, _ = self.hf_pooler(hf_seq)
+        fused = torch.cat([mf_context, hf_context], dim=-1)  # (B, mf+hf)
         outputs = [self.heads[scale](fused) for scale in self.scales]
-        return torch.cat(outputs, dim=-1)  # (B, total_logits)
+        return torch.cat(outputs, dim=-1)
 
-
-class ThreeLayerMoEWithClassificationHeads(nn.Module):
+class ThreeLayerMoEWithLowFreqRoutingOnly(nn.Module):
     def __init__(
         self,
         low_input_dim: int,
         mid_input_dim: int,
         high_input_dim: int,
         class_config: Dict[str, Dict[str, int]],
+        n_scales: int = 2,          # ← 控制预测前几个尺度
         low_hidden: int = 64,
         low_layers: int = 2,
         low_parallel: int = 2,
@@ -223,7 +214,12 @@ class ThreeLayerMoEWithClassificationHeads(nn.Module):
     ):
         super().__init__()
 
-        # === Single Low-Freq Encoder with Dual Outputs ===
+        # Validate and select scales
+        all_scales = ['5m', '15m', '30m', '60m', '180m']
+        assert 1 <= n_scales <= len(all_scales), f"n_scales must be 1～{len(all_scales)}"
+        self.scales_to_predict = all_scales[:n_scales]
+
+        # === Low-freq encoder: ONLY for routing (not for feature fusion) ===
         self.low_freq_encoder = LowFreqDualPathEncoder(
             input_dim=low_input_dim,
             hidden_dim=low_hidden,
@@ -250,11 +246,12 @@ class ThreeLayerMoEWithClassificationHeads(nn.Module):
             parallelism_factor=high_parallel
         )
 
+        # === Classification heads: NO lf_context ===
         self.classification_heads = MultiScaleClassificationHeads(
             mf_dim=mid_hidden,
             hf_dim=high_hidden,
-            lf_dim=low_hidden,
             class_config=class_config,
+            scales=self.scales_to_predict,
             hidden_dim=head_hidden
         )
 
@@ -264,15 +261,17 @@ class ThreeLayerMoEWithClassificationHeads(nn.Module):
         x_mid: torch.Tensor,
         x_high: torch.Tensor
     ) -> torch.Tensor:
-        # --- Single pass for low-freq: get both context and weights ---
-        lf_context, expert_weights = self.low_freq_encoder(x_low)  # (B, H), (B, E)
+        # --- Low-freq: ONLY get expert weights (ignore lf_context) ---
+        expert_weights = self.low_freq_encoder(x_low)  # (B, E)
 
         # --- Mid-freq MoE ---
-        expert_outputs = torch.stack([e(x_mid) for e in self.mid_experts], dim=1)
-        mf_context = torch.bmm(expert_weights.unsqueeze(1), expert_outputs).squeeze(1)
+        expert_outputs = torch.stack([e(x_mid) for e in self.mid_experts], dim=1)  # (B, E, H)
+        mf_context = torch.bmm(expert_weights.unsqueeze(1), expert_outputs).squeeze(1)  # (B, H)
 
-        # --- High-freq & classification ---
+        # --- High-freq ---
         hf_seq = self.high_freq_encoder(x_high, mf_context)
-        logits = self.classification_heads(mf_context, hf_seq, lf_context)
+
+        # --- Classification: ONLY mf + hf (no lf_context!) ---
+        logits = self.classification_heads(mf_context, hf_seq)
 
         return logits
