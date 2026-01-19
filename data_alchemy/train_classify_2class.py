@@ -307,7 +307,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_result_file = os.path.join(save_dir, "test_metrics.json")
 
     # 推荐：固定验证/测试时长（更合理），或按比例
-    val_ratio = train_cfg.get('val_ratio', 0.01)
+    val_ratio = train_cfg.get('val_ratio', 0.04)
     test_ratio = train_cfg.get('test_ratio', 0.012)
 
     low_freq_type = train_cfg.get("low_freq_type", "factor_k1h")
@@ -386,19 +386,15 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     # === 初始化 CSV ===
 
     # === 初始化 CSV ===
-
-    scale_names = scales[label_start:label_end]
+    labels = ['long_1min', 'short_1min','long_3min','short_3min', 'long_5min',
+              'short_5min', "long_15min", 'short_15min', "long_30min", 'short_30min']
+    selected_labels = labels[label_start:label_end]
     fieldnames = ["epoch", "train_loss", "val_loss"]
     log_indies = []
-    for scale in scale_names:
-        scale_names.append(f"{scale}_prec")
-        scale_names.append(f"{scale}_reca")
-        scale_names.append(f"{scale}_f1")
-        scale_index = []
-        scale_index.append(f"{scale}_prec")
-        scale_index.append(f"{scale}_reca")
-        scale_index.append(f"{scale}_f1")
+    for scale in selected_labels:
+        scale_index = [f"{scale}_prec", f"{scale}_reca", f"{scale}_f1"]
         log_indies.append(scale_index)
+        fieldnames += scale_index
 
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
