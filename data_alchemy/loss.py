@@ -191,6 +191,7 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         super().__init__()
         self.gamma = gamma
         self.reduction = reduction
+        self.alphas = alphas
 
         if alphas is not None:
             self.alphas = torch.tensor(alphas, dtype=torch.float32)  # (H,)
@@ -216,7 +217,7 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         pt = torch.exp(-bce_loss)  # (B, H)
 
         # Expand alphas to (1, H)
-        alpha_t = torch.full((1, H), 0.8, device=logits.device)
+        alpha_t = torch.full((1, H), 0.9, device=logits.device)
 
         # Apply alpha only to positive class (standard Focal Loss formulation)
         # Note: In binary case, alpha usually weights the positive class

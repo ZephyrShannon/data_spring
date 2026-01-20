@@ -340,7 +340,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_end = end_time
     interval = train_cfg.get('interval', 60)
     seq_len = model_cfg['seq_len']
-    criterion = MultiHeadBinaryFocalLoss(alphas=alphas, gamma=2.0)
+    criterion = MultiHeadBinaryFocalLoss(alphas=alphas, gamma=1.0)
 
     prefetch = train_cfg.get('prefetch_factor', 1)
     if prefetch == 0:
@@ -432,6 +432,9 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     patience_counter = 0
     epochs = config["training"]["num_epochs"]
 
+    if resume_from is None:
+        resume_from = os.path.join(save_dir, "best_model.pth")
+
     if resume_from and os.path.exists(resume_from):
         logger.info(f".Resume training from: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=True)
@@ -450,7 +453,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     class_weights = {k: v.to(device) for k, v in class_weights.items()}
     total_batchs = (len(train_dataset) + batch_size - 1) // batch_size
 
-    break_on_debug = True
+    break_on_debug = False
     for epoch in range(start_epoch, epochs):
         # --- Train ---
         model.train()
@@ -458,14 +461,16 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         cur_batch = 0
         start_time = datetime.datetime.now()
         model.update_epoch(epoch)
+        gamma = 1. + min(1.0, epoch / 5)
+        criterion.gamma = gamma
         for batch in train_loader:
             x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
             optimizer.zero_grad()
-            if epoch < 5:
+            if epoch < 0:
                 logits = model(x_low, x_mid, x_high, return_regularization=False)
                 reg_loss = 0
             else:
-                # 从第5个epoch开始检查是否需要正则化
+                # 从第1个epoch开始检查是否需要正则化
                 logits, reg_loss = model(x_low, x_mid, x_high, return_regularization=True)
             loss = criterion(logits, labels)  # multi_scale_classification_loss(logits, labels, scale_names=scale_names, class_weights=class_weights)
             loss += reg_loss
@@ -610,6 +615,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
 if __name__ == "__main__":
     pass
-    #main()
+    main()
 
-test_train()
+#test_train()

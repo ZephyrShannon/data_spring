@@ -225,7 +225,7 @@ class LowFreqDualPathEncoder(nn.Module):
         print(f"Routing Entropy: {entropy.item():.3f}")
 
         # 4. 更新使用统计（只在validation阶段或训练时跟踪）
-        if not self.training or return_regularization:
+        if return_regularization:
             with torch.no_grad():
                 # 计算每个专家的使用率（soft counting）
                 batch_usage = expert_weights.mean(dim=0)  # (E,)
@@ -442,7 +442,7 @@ class ThreeLayerMoEWithSmartRouting(nn.Module):
             high_parallel: int = 4,
             head_hidden: int = 128,
             # 新增参数
-            use_routing_regularization: bool = False,
+            use_routing_regularization: bool = True,
             regularization_lambda: float = 0.01,
             death_threshold: float = 0.01
     ):
