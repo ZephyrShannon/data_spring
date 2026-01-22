@@ -428,8 +428,7 @@ class ThreeLayerMoEWithSmartRouting(nn.Module):
             mid_input_dim: int,
             high_input_dim: int,
             class_config: Dict[str, Dict[str, int]],
-            start_scale: int = 0,
-            end_scale: int =0,
+            scales_to_predict: List[str],
             low_hidden: int = 64,
             low_layers: int = 2,
             low_parallel: int = 2,
@@ -449,8 +448,7 @@ class ThreeLayerMoEWithSmartRouting(nn.Module):
         super().__init__()
 
         # Validate and select scales
-        all_scales = ['1m', '3m', '5m', '15m', '30m', '60m', '180m']
-        self.scales_to_predict = all_scales[int(start_scale/2):int((end_scale+1)/2)]
+        self.scales_to_predict = scales_to_predict
 
         # === Low-freq encoder with improved routing ===
         self.low_freq_encoder = LowFreqDualPathEncoder(

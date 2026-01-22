@@ -292,7 +292,7 @@ def calculate_accuracy_precision_recall_per_class(
     return result_dict
 
 
-def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None):
+def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None, estimate = False):
     train_cfg = config["training"]
     model_cfg = config['model']
     device = get_device()
@@ -343,7 +343,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     criterion = MultiHeadBinaryFocalLoss(alphas=alphas, gamma=1.0)
 
     prefetch = train_cfg.get('prefetch_factor', 1)
-    if prefetch == 0:
+    if prefetch == 0 or estimate:
         prefetch = None
         num_workers = 0
     else:
@@ -399,6 +399,11 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     with open(csv_file, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+
+    if estimate:
+        from data_alchemy.utils import MultiScaleClassificationMetrics
+        metrics = MultiScaleClassificationMetrics(label_num)
+
     # === 随机种子 ===
     torch.manual_seed(config["training"]["seed"])
     model = ThreeLayerMoEWithSmartRouting(
@@ -406,8 +411,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         mid_input_dim=config["model"]["mid_freq_dim"],
         high_input_dim=config["model"]["high_freq_dim"],
         class_config=config["class_config"],
-        start_scale=label_start,
-        end_scale=label_end,
+        scales_to_predict=selected_labels,
         low_hidden=config["model"]["router_hidden"],
         low_layers=config["model"]["router_layers"],
         low_parallel=config["model"]["router_parallelism"],
@@ -420,6 +424,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         high_parallel=config["model"]["fusion_parallelism"],
         head_hidden=config["model"]["head_hidden"]
     ).to(device)
+    param_count = sum(p.numel() for p in model.parameters())
     # Model
     # === 优化器 & 调度器 ===
     optimizer = torch.optim.AdamW(
@@ -443,8 +448,13 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         start_epoch = checkpoint.get("epoch", -1) + 1
         best_val_loss = checkpoint.get("val_loss", float("inf"))
         logger.info(f".Resumed from epoch {start_epoch}, best val loss: {best_val_loss:.6f}")
+        model_loaded = True
     else:
         start_epoch = 0
+        model_loaded =False
+
+    if model_loaded:
+        pass
 
     epochs = config["training"]["num_epochs"]
     grad_clip = config["training"]["grad_clip"]
@@ -615,6 +625,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
 if __name__ == "__main__":
     pass
-    main()
+    #main()
 
-#test_train()
+test_train()
