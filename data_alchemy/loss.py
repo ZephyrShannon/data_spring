@@ -255,7 +255,9 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         assert targets.shape == (B, H)
 
         metrics = []
-        preds = preds.bool()
+        probabilities = torch.sigmoid(preds)
+        # 转换为二进制预测
+        preds = (probabilities >= 0.5)
         targets = targets.bool()
 
         for h in range(H):

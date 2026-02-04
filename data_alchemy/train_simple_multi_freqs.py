@@ -1,6 +1,5 @@
 # train.py
 import csv
-import datetime
 import json
 import logging
 import os
@@ -11,11 +10,17 @@ import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch.utils.data import DataLoader
 
-from data_alchemy.gru_moe_model_2class import ThreeLayerMoEWithSmartRouting
 from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLoss
-from data_alchemy.utils import get_device
 from data_loader.data_loader import *  # 你已实现
 
+
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
 
 
 def load_config(path: str) -> dict:
@@ -71,6 +76,7 @@ def export_to_onnx(model, dummy_input, filepath="model.onnx"):
     )
     print(f"✅ ONNX 模型已导出至: {filepath}")
 
+
 def main():
     config_file = sys.argv[1]
     config = load_config(config_file)
@@ -83,6 +89,7 @@ def main():
     if len(sys.argv) > 6:
         estimate = sys.argv[6].lower() == 'true'
     start_train(config, data_dir, market, start_time, end_time, estimate=estimate)
+
 
 def test_data(config, data_dir, market, start_time, end_time):
     train_cfg = config["training"]
@@ -145,11 +152,13 @@ def test_data(config, data_dir, market, start_time, end_time):
 
     # 验证集（用于早停和调参）
     val_dataset = get_data_set(data_dir, "spot", "ticks", market, val_start, val_end, interval, seq_len,
-                               mid_freq_type, low_freq_type, labels)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
+                               mid_freq_type, low_freq_type,
+                               labels)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
 
     # 测试集（仅最后评估一次）
     test_dataset = get_data_set(data_dir, "spot", "labels", market, test_start, test_end, interval,
-                                seq_len, mid_freq_type, low_freq_type, labels)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
+                                seq_len, mid_freq_type, low_freq_type,
+                                labels)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
 
     print(f"Train dataset total length: {len(train_dataset)}\n")
     for i in range(len(train_dataset)):
@@ -177,6 +186,7 @@ def test_data(config, data_dir, market, start_time, end_time):
         except Exception as e:
             print(f"Try fetch data:[{dt}] failed")
 
+
 def test_train():
     config = load_config('configs/model.yaml')
     data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
@@ -190,18 +200,21 @@ def test_train():
     start_train(config, data_dir, market, start_time, end_time, resume_from)
 
 
-def get_data_set(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len, mid_type, low_type, labels):
-    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, interval, seq_len=seq_len)
-    return SegmentSets(all_list, data_dir, market, label_type=data_type, mid_type=mid_type, low_type=low_type, required_labels=labels)
+def get_data_set(data_dir, biz, lb_data_type, market, start_time, end_time, interval, seq_len, mid_type, low_type,
+                 labels, hf_data_type=None):
+    all_list = get_all_file_list(data_dir, biz, lb_data_type, market, start_time, end_time, interval, seq_len=seq_len)
+    return SegmentSets(all_list, data_dir, market, label_type=lb_data_type, mid_type=mid_type, low_type=low_type,
+                       required_labels=labels, hf_data_type=hf_data_type)
 
 
 from typing import Dict
 import torch
 
+
 def calculate_accuracy_precision_recall_per_class(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    scales: List[str],
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        scales: List[str],
 ) -> Dict[str, float]:
     """
     计算每个子任务的准确率 + 每个类别的精确率和召回率
@@ -215,14 +228,14 @@ def calculate_accuracy_precision_recall_per_class(
 
     for i, scale in enumerate(scales):
         # ===== LS Choice =====
-        ls_classes = 5  #class_config['ls_choice'][scale]
+        ls_classes = 5  # class_config['ls_choice'][scale]
         ls_logits = logits[:, current_offset:current_offset + ls_classes]
         ls_pred = ls_logits.argmax(dim=1)
         ls_label = labels[:, i]
 
         # Accuracy
-        #acc_ls = (ls_pred == ls_label).float().mean().item()
-        #result_dict[f"{scale}_ls_acc"] = round(acc_ls, 6)
+        # acc_ls = (ls_pred == ls_label).float().mean().item()
+        # result_dict[f"{scale}_ls_acc"] = round(acc_ls, 6)
 
         # Per-class Precision & Recall
         for cls in range(ls_classes):
@@ -287,7 +300,7 @@ def calculate_accuracy_precision_recall_per_class(
     return result_dict
 
 
-def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None, estimate = False):
+def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None, estimate=False):
     train_cfg = config["training"]
     model_cfg = config['model']
     device = get_device()
@@ -334,7 +347,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     val_end = test_start
     test_end = end_time
     interval = train_cfg.get('interval', 60)
-    seq_len = model_cfg['seq_len']
+    seq_len = model_cfg['low_freq']['seq_len']
     criterion = MultiHeadBinaryFocalLoss(alphas=alphas, gamma=1.0)
 
     prefetch = train_cfg.get('prefetch_factor', 1)
@@ -358,19 +371,24 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     label_cols = all_cols[label_start:label_end]
     train_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, train_start, train_end,
                                  interval, seq_len, mid_freq_type, low_freq_type, label_cols)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                              prefetch_factor=prefetch, pin_memory=True)
 
     # 验证集（用于早停和调参）
     print(f"Val data: {val_start}-{train_end}, interval: {interval}")
     val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, interval,
-                               seq_len, mid_freq_type, low_freq_type, label_cols) #TimeSeriesDataset(data_dir, market, val_start, val_end)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch, pin_memory=True)
+                               seq_len, mid_freq_type, low_freq_type,
+                               label_cols)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                            prefetch_factor=prefetch, pin_memory=True)
 
     # 测试集（仅最后评估一次）
     print(f"Test data: {test_start}-{test_end} seq_len: {seq_len}")
     test_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, test_start, test_end, interval,
-                                seq_len, mid_freq_type, low_freq_type, label_cols) # TimeSeriesDataset(data_dir, market, test_start, test_end)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, prefetch_factor=prefetch, pin_memory=True)
+                                seq_len, mid_freq_type, low_freq_type,
+                                label_cols)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                             prefetch_factor=prefetch, pin_memory=True)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -381,7 +399,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     # === 初始化 CSV ===
 
     # === 初始化 CSV ===
-    labels = ['long_1min', 'short_1min','long_3min','short_3min', 'long_5min',
+    labels = ['long_1min', 'short_1min', 'long_3min', 'short_3min', 'long_5min',
               'short_5min', "long_15min", 'short_15min', "long_30min", 'short_30min']
     selected_labels = labels[label_start:label_end]
     fieldnames = ["epoch", "train_loss", "val_loss"]
@@ -401,25 +419,10 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     # === 随机种子 ===
     torch.manual_seed(config["training"]["seed"])
-    model = ThreeLayerMoEWithSmartRouting(
-        low_input_dim=config["model"]["low_freq_dim"],
-        mid_input_dim=config["model"]["mid_freq_dim"],
-        high_input_dim=config["model"]["high_freq_dim"],
-        class_config=config["class_config"],
-        scales_to_predict=selected_labels,
-        low_hidden=config["model"]["router_hidden"],
-        low_layers=config["model"]["router_layers"],
-        low_parallel=config["model"]["router_parallelism"],
-        mid_hidden=config["model"]["expert_hidden"],
-        mid_layers=config["model"]["expert_layers"],
-        mid_parallel=config["model"]["expert_parallelism"],
-        num_mid_experts=config["model"]["num_experts"],
-        high_hidden=config["model"]["fusion_hidden"],
-        high_layers=config["model"]["fusion_layers"],
-        high_parallel=config["model"]["fusion_parallelism"],
-        head_hidden=config["model"]["head_hidden"]
-    ).to(device)
-    param_count = sum(p.numel() for p in model.parameters())
+
+    from data_alchemy.simple_stack_model_config import create_model_from_config
+    model = create_model_from_config(config_dict=config)
+
     # Model
     # === 优化器 & 调度器 ===
     optimizer = torch.optim.AdamW(
@@ -450,8 +453,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         if estimate:
             raise Exception("Model record not found! Estimating failed")
         start_epoch = 0
-        model_loaded =False
-
+        model_loaded = False
 
     epochs = config["training"]["num_epochs"]
     grad_clip = config["training"]["grad_clip"]
@@ -468,12 +470,12 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         total_reg_loss = 0.0
         cur_batch = 0
         start_time = datetime.datetime.now()
-        model.update_epoch(epoch)
+        #model.update_epoch(epoch)
         gamma = 1. + min(1.0, epoch / 5)
         criterion.gamma = gamma
         if not estimate:
             for batch in train_loader:
-                x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
+                x_mid, x_low, labels = [b.to(device) for b in batch]
                 optimizer.zero_grad()
 
                 if epoch > 3:
@@ -481,13 +483,10 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 else:
                     reg_ratio = 0.1
                 # 从第1个epoch开始检查是否需要正则化
-                logits, reg_loss = model(x_low, x_mid, x_high, return_regularization=True)
+                logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 total_train_loss += loss.item()
-                total_reg_loss += reg_loss.item()
-                scale_factor = reg_ratio * loss.detach() / (reg_loss.detach() + 1e-8)
-                loss = loss + scale_factor * reg_loss
-
+                optimizer.zero_grad()
                 loss.backward()
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -510,7 +509,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         model.eval()
         total_val_loss = 0.0
         all_val_details = {}
-        #collected_pred_details = defaultdict(list)
+        # collected_pred_details = defaultdict(list)
         with torch.no_grad():
             all_val_details = {}
             all_probs_list = []
@@ -527,7 +526,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 for i in range(len(log_indies)):
                     scale_names = log_indies[i]
                     scale_detail = details[i]
-                    for name,detail in zip(scale_names, scale_detail):
+                    for name, detail in zip(scale_names, scale_detail):
                         all_val_details[name] = all_val_details.get(name, 0) + detail
                 if estimate:
                     all_logits_list.append(logits.cpu().numpy())
@@ -571,7 +570,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writerow(log_dict)
 
-        logger.info(f"Epoch {epoch + 1}/{epochs} | Train Loss: {avg_train_loss:.6f}+{avg_reg_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+        logger.info(
+            f"Epoch {epoch + 1}/{epochs} | Train Loss: {avg_train_loss:.6f}+{avg_reg_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
         if estimate:
             break
         if avg_val_loss < best_val_loss:
@@ -612,7 +612,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     with torch.no_grad():
         for batch in test_loader:
             x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
-            logits = model(x_low, x_mid, x_high, return_regularization = False)
+            logits = model(x_low, x_mid, x_high, return_regularization=False)
             loss = criterion(logits, labels)
             total_test_loss += loss.item()
             details = criterion.compute_metrics_per_head(logits, labels)
@@ -660,6 +660,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
 if __name__ == "__main__":
     pass
-    #main()
+    # main()
 
 test_train()

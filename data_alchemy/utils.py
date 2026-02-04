@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Dict
 
 import torch
 
@@ -140,6 +140,14 @@ class ClassificationMetrics:
             'confusion_matrix': ClassificationMetrics.calculate_confusion_matrix(preds, labels)
         }
 
+
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
 
 class MultiScaleClassificationMetrics:
     """多时间尺度分类指标计算"""

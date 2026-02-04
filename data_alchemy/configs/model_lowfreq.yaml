@@ -1,0 +1,96 @@
+# config.yaml
+low_model:
+  model_name: AdvancedDNNCausalCNNRNN
+  description: 高级DNN-CausalCNN-RNN模型配置示例
+  version: 1.0.0
+  input_dim: 14
+  input_seq_len: 600
+  dnn1:
+    hidden_dims:
+      - 32
+      - 32
+      - 64
+      - 64
+      - 128
+      - 128
+      - 256
+    activation: relu
+    dropout: 0.1
+    use_layer_norm: true
+  cnn:
+    hidden_dims:
+      - 256
+      - 256
+      - 256
+    kernel_sizes:
+      - 3
+      - 8
+      - 24
+    dilations:
+      - 1
+      - 2
+      - 4
+    strides:
+      - 1
+      - 1
+      - 1
+    use_skip_connections: true
+  dnn2:
+    hidden_dims:
+      - 256
+      - 128
+    activation: relu
+    dropout: 0.2
+    use_layer_norm: true
+  rnn:
+    rnn_type: gru
+    hidden_dim: 256
+    num_layers: 2
+    bidirectional: false
+    dropout: 0.3
+  output:
+    output_dim: null
+    output_type: classification
+    num_classes: 3
+    return_sequences: true
+  device: mps
+
+class_config:
+  ls_choice:
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
+  volat:
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
+
+training:
+  seed: 1111                   # 随机种子，保证可复现性
+  batch_size: 32                # M 系列芯片显存有限，建议 16 或 32
+  learning_rate: 0.001
+  num_epochs: 50
+  grad_clip: 1.0                # 梯度裁剪阈值
+  device: "auto"                # 自动选择：mps / cuda / cpu
+  interval: 60
+  low_freq_type: factor_k1h
+  mid_freq_type: factor_k5m
+  prefetch_factor: 0
+  # 学习率调度
+  lr: 0.0002
+  weight_decay: 0.001
+  label_start: 6
+  label_end: 8
+  label_type: ls1_labels
+  alphas:
+    - 0.9
+# ==========================================
+# 回调与保存
+# ==========================================
+callbacks:
+  save_dir: "checkpoints/exp_m4_v1"  # 所有输出（模型、日志、CSV、test结果）保存目录
+  patience: 3                    # 早停耐心值：验证 loss 连续 5 轮不下降则停止

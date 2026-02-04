@@ -182,10 +182,15 @@ class SegmentSets(Dataset):
             label_type: str,
             mid_type: str = "factor_k5m",
             low_type: str = "factor_k1h",
-            required_labels=["ls_choice_5m","ls_choice_15m"]
+            required_labels =["ls_choice_5m","ls_choice_15m"],
+            hf_data_type:str="ticks",
     ):
         # === 全局唯一缓存 ===
-        self.ticks_cache = HourlyCache(data_dir, market, "ticks")
+        if hf_data_type:
+            self.ticks_cache = HourlyCache(data_dir, market, hf_data_type)
+            self.load_hf_data = True
+        else:
+            self.load_hf_data = False
         self.kline_mid = MonthlyDataCache(data_dir, market, mid_type)
         self.kline_low = MonthlyDataCache(data_dir, market, low_type)
         self.data_dir = data_dir
@@ -205,6 +210,7 @@ class SegmentSets(Dataset):
         # === 标签缓存 ===
         self.labels_cache = None
         self.labels_cache_date = None
+        self.epoch = 0
 
     def _get_labels(self, dt_curr: datetime.datetime):
         data_hour = get_data_hour(dt_curr)
@@ -237,6 +243,7 @@ class SegmentSets(Dataset):
 
     def __getitem__(self, idx: int):
         # 1. 找到对应的 segment 和 local index
+        idx = idx + self.epoch
         now = None
         for start, end, seg in self.all_segments:
             if start <= idx < end:
@@ -247,30 +254,24 @@ class SegmentSets(Dataset):
             raise IndexError(f"Index {idx} out of range")
 
         # 2. 加载高频数据
-        df = self.ticks_cache.get_hf_data(now, add_factor=True)
-        if df is None:
-            raise ValueError(f"No HF data for {now}")
+        if self.load_hf_data:
+            df = self.ticks_cache.get_hf_data(now, add_factor=True)
+            if df is None:
+                raise ValueError(f"No HF data for {now}")
 
-        X_high = df.loc[df.index <= int(now.timestamp())].iloc[-600:].copy()
-        if len(X_high) < 600:
-            raise ValueError(f"Insufficient HF data at {now}, got {len(X_high)} rows")
+            X_high = df.loc[df.index <= int(now.timestamp())].iloc[-seg.seq_len_seconds:].copy()
+            X_high['t_of_day'] = (X_high.index % 86400) / 86400
+            x_high_tensor = torch.FloatTensor(X_high.values)
 
         # 3. 加载中低频
-        X_mid = self._get_lf_mid_seq(now)
-        X_low = self._get_lf_low_seq(now)
+        X_mid = self._get_lf_mid_seq(now, seq_len_seconds=seg.seq_len_seconds)
+        X_low = self._get_lf_low_seq(now, seq_len_seconds=seg.seq_len_seconds)
 
         # 4. 添加时间特征
-        X_high['t_of_day'] = (X_high.index % 86400) / 86400
         X_low = X_low.copy()
         X_low['tod_low'] = (X_low.index % 86400) / 86400
         X_mid = X_mid.copy()
         X_mid['tod_mid'] = (X_mid.index % 86400) / 86400
-
-        # 5. 检查对齐
-        if not (len(X_high) == len(X_low) == len(X_mid) == 600):
-            raise ValueError(
-                f"Shape mismatch: high={X_high.shape}, low={X_low.shape}, mid={X_mid.shape} at {now}"
-            )
 
         # 6. 获取标签
         y = self._get_labels(now)
@@ -278,12 +279,14 @@ class SegmentSets(Dataset):
             raise ValueError(f"No label for {now}")
 
         # 7. 转为 Tensor
-        x_high_tensor = torch.FloatTensor(X_high.values)
+
         x_mid_tensor = torch.FloatTensor(X_mid.values)
         x_low_tensor = torch.FloatTensor(X_low.values)
         y_tensor = torch.FloatTensor(y.values.ravel())  # 注意：分类标签应为 LongTensor！ 二分类是FloatTensor
-
-        return x_high_tensor, x_mid_tensor, x_low_tensor, y_tensor
+        if self.load_hf_data:
+            return x_high_tensor, x_mid_tensor, x_low_tensor, y_tensor
+        else:
+            return x_mid_tensor, x_low_tensor, y_tensor
 
     def get_item_datetime(self, idx: int):
         for start, end, seg in self.all_segments:
