@@ -1,0 +1,128 @@
+# config.yaml
+# config_default.yaml
+model:
+  name: "MultiFreqMultiLabelClassifier"
+  device: "auto"
+  init_seed: 1111
+
+  low_freq:
+    input_dim: 14
+    seq_len: 300
+    feature_dim: 64
+
+    dnn1:
+      hidden_dims_list: [[32, 64, 64, 64, 64, 64, 64],[32,64,128,128, 128,128]]
+      activations: "relu"
+      dropouts: 0.1
+      use_layer_norms: true
+      aggregation_method: "concat"
+
+    cnn:
+      hidden_dims_list: [[128, 256, 256],[128, 128, 256]]
+      kernel_sizes_list: [[3, 5, 7], [3,7,15]]
+      dilations_list: null
+      strides_list: null
+      use_skip_connections_list: true
+      aggregation_method: "concat"
+
+    rnn:
+      types: "gru"
+      hidden_dims: 128
+      num_layers_list: 2
+      dropout_list: 0.2
+      aggregation_method: "concat"
+      use_attention_aggregation: false
+
+    use_residual_connections: false
+    residual_strength: 0.1
+
+  mid_freq:
+    input_dim: 17
+    seq_len: 300
+    feature_dim: 128
+
+    dnn1:
+      hidden_dims_list: [[32, 64, 64, 64, 64, 64, 64],[32,64,128,128, 128,128]]
+      activations: "relu"
+      dropouts: 0.1
+      use_layer_norms: true
+      aggregation_method: "concat"
+
+    cnn:
+      hidden_dims_list: [[128, 256, 256],[128,128,256]]
+      kernel_sizes_list: [[5, 7, 15], [5, 15, 45]]
+      dilations_list: null
+      strides_list: null
+      use_skip_connections_list: true
+      aggregation_method: "concat"
+
+    rnn:
+      types: "lstm"
+      hidden_dims: 256
+      num_layers_list: 2
+      dropout_list: 0.2
+      aggregation_method: "concat"
+      use_attention_aggregation: false
+
+    use_residual_connections: false
+    residual_strength: 0.1
+    use_film: true
+
+  feature_fusion:
+    shared_hidden_dims: [512, 256]
+    dropout: 0.2
+    use_batch_norm: true
+    activation: "relu"
+
+  classification:
+    num_labels: 2
+    per_label_hidden_dims: [128, 64, 32]
+    label_dropout: 0.2
+    use_batch_norm: true
+    threshold: 0.5
+
+  evaluation:
+    metrics: ["accuracy", "f1_micro", "f1_macro", "precision", "recall"]
+    threshold: 0.5
+    average_methods: ["micro", "macro", "weighted"]
+
+class_config:
+  ls_choice:
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
+  volat:
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
+
+training:
+  seed: 1111                   # 随机种子，保证可复现性
+  batch_size: 4                # M 系列芯片显存有限，建议 16 或 32
+  learning_rate: 0.001
+  num_epochs: 30
+  grad_clip: 1.0                # 梯度裁剪阈值
+  device: "auto"                # 自动选择：mps / cuda / cpu
+  interval: 300
+  low_freq_type: factor_k1h
+  mid_freq_type: factor_k5m
+  prefetch_factor: 0
+  # 学习率调度
+  lr: 0.0002
+  weight_decay: 0.001
+  label_start: 6
+  label_end: 8
+  label_type: ls1_labels
+  alphas:
+    - 0.9
+    - 0.9
+# ==========================================
+# 回调与保存
+# ==========================================
+callbacks:
+  save_dir: "checkpoints/exp_m4_big_and_deep"  # 所有输出（模型、日志、CSV、test结果）保存目录
+  patience: 3                    # 早停耐心值：验证 loss 连续 5 轮不下降则停止

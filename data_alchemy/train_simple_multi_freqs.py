@@ -8,11 +8,11 @@ from typing import Optional, List
 
 import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 from torch.utils.data import DataLoader
 
 from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLoss
 from data_loader.data_loader import *  # 你已实现
-
 
 def get_device():
     if torch.backends.mps.is_available():
@@ -83,11 +83,19 @@ def main():
     data_dir = sys.argv[2]
     market = sys.argv[3]
     start_date = sys.argv[4]
-    start_time = datetime.datetime.strptime(f"{start_date} 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
+    if len(start_date) == 10:
+        start_time = datetime.datetime.strptime(f"{start_date} 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
+    else:
+        start_time = datetime.datetime.strptime(f"{start_date}:00:00+0000", '%Y-%m-%dT%H:%M:%S%z')
     end_date = sys.argv[5]
-    end_time = datetime.datetime.strptime(f"{end_date} 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
+    if len(end_date) == 10:
+        end_time = datetime.datetime.strptime(f"{end_date} 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
+    else:
+        end_time = datetime.datetime.strptime(f"{end_date}:00:00+0000", '%Y-%m-%dT%H:%M:%S%z')
     if len(sys.argv) > 6:
         estimate = sys.argv[6].lower() == 'true'
+    else:
+        estimate = False
     start_train(config, data_dir, market, start_time, end_time, estimate=estimate)
 
 
@@ -348,7 +356,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_end = end_time
     interval = train_cfg.get('interval', 60)
     seq_len = model_cfg['low_freq']['seq_len']
-    criterion = MultiHeadBinaryFocalLoss(alphas=alphas, gamma=1.0)
+    criterion = MultiHeadBinaryFocalLoss(alphas=alphas)
 
     prefetch = train_cfg.get('prefetch_factor', 1)
     if prefetch == 0 or estimate:
@@ -430,10 +438,14 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         lr=config["training"]["lr"],
         weight_decay=config["training"]["weight_decay"]
     )
+    scheduler = MultiStepLR(
+        optimizer,
+        milestones=[1,2,5,10,15,30],  # 在这些epoch降低
+        gamma=0.5  # 每次乘以0.5
+    )
 
     best_val_loss = float("inf")
     patience_counter = 0
-    epochs = config["training"]["num_epochs"]
 
     if resume_from is None:
         resume_from = os.path.join(save_dir, "best_model.pth")
@@ -485,7 +497,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 # 从第1个epoch开始检查是否需要正则化
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
-                total_train_loss += loss.item()
+                total_train_loss += loss.mean()
                 optimizer.zero_grad()
                 loss.backward()
                 if grad_clip > 0:
@@ -517,11 +529,11 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             all_labels_list = []
 
             for batch in val_loader:
-                x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
-                logits = model(x_low, x_mid, x_high, return_regularization=False)
+                x_mid, x_low, labels = [b.to(device) for b in batch]
+                logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 details = criterion.compute_metrics_per_head(logits, labels)
-                total_val_loss += loss.item()
+                total_val_loss += loss.mean()
                 # 累积 loss 和 accuracy（保持你原有逻辑）
                 for i in range(len(log_indies)):
                     scale_names = log_indies[i]
@@ -550,7 +562,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
                 # 创建 DataFrame
                 df = pd.DataFrame(data_dict)
-
                 # 保存
                 os.makedirs(save_dir, exist_ok=True)
                 df.to_csv(os.path.join(save_dir, "val_predictions.csv"), index=False)
@@ -558,10 +569,12 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
         avg_val_loss = total_val_loss / len(val_loader)
 
+        scheduler.step(epoch)
+
         log_dict = {
             "epoch": epoch + 1,
             "train_loss": round(avg_train_loss, 6),
-            "val_loss": round(avg_val_loss, 6),
+            "val_loss": round(avg_val_loss.item(), 6),
             **{k: v / len(test_loader) for k, v in all_val_details.items()},
         }
 
@@ -584,7 +597,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 'config': config,
                 'val_loss': avg_val_loss,
             }, os.path.join(save_dir, "best_model.pth"))
-            logger.info("→ New best model saved!")
+            logger.info("New best model saved!")
         else:
             patience_counter += 1
             if patience_counter >= config["callbacks"]["patience"]:
@@ -611,10 +624,10 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     with torch.no_grad():
         for batch in test_loader:
-            x_high, x_mid, x_low, labels = [b.to(device) for b in batch]
-            logits = model(x_low, x_mid, x_high, return_regularization=False)
+            x_mid, x_low, labels = [b.to(device) for b in batch]
+            logits = model(x_low, x_mid)
             loss = criterion(logits, labels)
-            total_test_loss += loss.item()
+            total_test_loss += loss.mean()
             details = criterion.compute_metrics_per_head(logits, labels)
 
             # 累积 loss
@@ -636,7 +649,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     # 构建最终结果
     test_metrics = {
-        "test_loss": round(avg_test_loss, 6),
+        "test_loss": round(avg_test_loss.item(), 6),
         "subtask_losses": {k: round(v, 6) for k, v in all_test_details.items()},
     }
 
@@ -659,7 +672,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
 
 if __name__ == "__main__":
+    main()
     pass
-    # main()
 
-test_train()
+#test_train()

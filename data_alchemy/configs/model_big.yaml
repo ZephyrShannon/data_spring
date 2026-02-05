@@ -42,16 +42,16 @@ class_config:
 
 training:
   seed: 1111                   # 随机种子，保证可复现性
-  batch_size: 180                # M 系列芯片显存有限，建议 16 或 32
-  num_epochs: 30
+  batch_size: 16                # M 系列芯片显存有限，建议 16 或 32
+  num_epochs: 50
   grad_clip: 1.0                # 梯度裁剪阈值
   device: "auto"                # 自动选择：mps / cuda / cpu
-  interval: 60
+  interval: 300
   low_freq_type: factor_k1h
   mid_freq_type: factor_k5m
   prefetch_factor: 1
   # 学习率调度
-  lr: 0.0002
+  lr: 0.002
   weight_decay: 0.001
   label_start: 7
   label_end: 8

@@ -187,54 +187,36 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         reduction: 'mean' or 'sum' over all heads and samples
     """
 
-    def __init__(self, alphas: Optional[List[float]], gamma: float = 2.0, reduction: str = 'mean'):
+    def __init__(self, alphas: Optional[List[float]]):
         super().__init__()
-        self.gamma = gamma
-        self.reduction = reduction
         self.alphas = alphas
 
         if alphas is not None:
             self.alphas = torch.tensor(alphas, dtype=torch.float32)  # (H,)
+            self.alphas = self.alphas/(1-self.alphas)
         else:
             raise Exception("alphas is None!") # will be handled in forward
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        Compute multi-head binary focal loss.
+        base_loss = F.binary_cross_entropy_with_logits(
+            logits, targets,
+            reduction='none'  # 保持每个元素的损失
+        )
 
-        Args:
-            logits: (B, H) —— raw logits for H binary tasks
-            targets: (B, H) —— binary labels (0 or 1)
-
-        Returns:
-            Scalar loss (after reduction)
-        """
-        B, H = logits.shape
-        assert targets.shape == (B, H), f"targets shape {targets.shape} != ({B}, {H})"
-
-        # BCE loss per element (no reduction)
-        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')  # (B, H)
-        pt = torch.exp(-bce_loss)  # (B, H)
-
-        # Expand alphas to (1, H)
-        alpha_t = torch.full((1, H), 0.9, device=logits.device)
-
-        # Apply alpha only to positive class (standard Focal Loss formulation)
-        # Note: In binary case, alpha usually weights the positive class
-        # So we do: alpha * targets + (1 - alpha) * (1 - targets)
-        # But common practice (e.g., RetinaNet) uses alpha only on positive,
-        # and implicitly (1-alpha) on negative via complementary weighting.
-        # Here we follow the standard: alpha_t applied where target=1
-        at = alpha_t * targets + (1 - alpha_t) * (1 - targets)  # (B, H)
-
-        focal_loss = at * (1 - pt) ** self.gamma * bce_loss  # (B, H)
+        # 2. 创建放大因子
+        # 正样本：alpha倍
+        # 负样本：1倍
+        multiplier = torch.where(
+            targets == 1,
+            torch.tensor(self.alphas, device=logits.device),
+            torch.tensor(1.0, device=logits.device)
+        )
+        amplified_loss = base_loss * multiplier
 
         if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
+            return amplified_loss.mean()
         else:
-            return focal_loss
+            return amplified_loss.sum()
 
     @staticmethod
     def compute_metrics_per_head(

@@ -1,4 +1,6 @@
 data/
+checkpoints/
+checkpoint/
 .idea
 spot_logs/
 *.log
