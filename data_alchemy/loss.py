@@ -208,15 +208,12 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         # 负样本：1倍
         multiplier = torch.where(
             targets == 1,
-            torch.tensor(self.alphas, device=logits.device),
-            torch.tensor(1.0, device=logits.device)
+            self.alphas.clone().detach(),
+            torch.tensor(1., device=logits.device)
         )
         amplified_loss = base_loss * multiplier
+        return amplified_loss.mean()
 
-        if self.reduction == 'mean':
-            return amplified_loss.mean()
-        else:
-            return amplified_loss.sum()
 
     @staticmethod
     def compute_metrics_per_head(

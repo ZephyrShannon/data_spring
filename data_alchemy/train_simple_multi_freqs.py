@@ -497,7 +497,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 # 从第1个epoch开始检查是否需要正则化
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
-                total_train_loss += loss.mean()
+                total_train_loss += loss
                 optimizer.zero_grad()
                 loss.backward()
                 if grad_clip > 0:
@@ -533,7 +533,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 details = criterion.compute_metrics_per_head(logits, labels)
-                total_val_loss += loss.mean()
+                total_val_loss += loss
                 # 累积 loss 和 accuracy（保持你原有逻辑）
                 for i in range(len(log_indies)):
                     scale_names = log_indies[i]
@@ -573,7 +573,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
         log_dict = {
             "epoch": epoch + 1,
-            "train_loss": round(avg_train_loss, 6),
+            "train_loss": round(avg_train_loss.item(), 6),
             "val_loss": round(avg_val_loss.item(), 6),
             **{k: v / len(test_loader) for k, v in all_val_details.items()},
         }
@@ -605,7 +605,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 break
 
         # --- Check for manual stop signal ---
-        if os.path.exists(os.path.join(save_dir, "epoch.stop")):
+        if os.path.exists(os.path.join(save_dir, "epoch.stop")) or break_on_debug:
             logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
             os.remove(os.path.join(save_dir, "epoch.stop"))  # 可选：自动清理
             break
@@ -627,7 +627,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             x_mid, x_low, labels = [b.to(device) for b in batch]
             logits = model(x_low, x_mid)
             loss = criterion(logits, labels)
-            total_test_loss += loss.mean()
+            total_test_loss += loss
             details = criterion.compute_metrics_per_head(logits, labels)
 
             # 累积 loss
