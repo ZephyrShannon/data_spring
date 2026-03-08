@@ -6,42 +6,63 @@ model:
   low_freq_dim: 14
   seq_len: 600
 
-  router_lstm_hidden: 32
-  router_output_dim: 16
-  router_lstm_layers: 8
-  router_lstm_parallelism: 4
+  router_hidden: 32
+  router_output_dim: 8
+  router_layers: 8
+  router_parallelism: 4
 
   num_experts: 5
-  expert_lstm_hidden: 32
-  expert_lstm_layers: 16
-  expert_lstm_parallelism: 2
+  expert_hidden: 32
+  expert_layers: 4
+  expert_parallelism: 4
   expert_dropout: 0.2
 
-  fusion_lstm_hidden: 64
-  fusion_lstm_layers: 4
-  fusion_lstm_parallelism: 4
+  fusion_hidden: 32
+  fusion_layers: 4
+  fusion_parallelism: 4
 
+  head_hidden: 128
 
-  output_targets: 10
-  test_duration_days: 3
   val_ratio: 0.01
+  num_labels: 10
+  num_classes_per_label: 5
+
+class_config:
+  ls_choice:
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
+  volat:
+    1m: 2
+    3m: 2
+    5m: 2
+    15m: 2
+    30m: 2
 
 training:
-  batch_size: 2                # M 系列芯片显存有限，建议 16 或 32
-  prefetch_factor: 0
+  seed: 1111                   # 随机种子，保证可复现性
+  batch_size: 32                # M 系列芯片显存有限，建议 16 或 32
   learning_rate: 0.001
-  num_epochs: 120
+  num_epochs: 50
   grad_clip: 1.0                # 梯度裁剪阈值
   device: "auto"                # 自动选择：mps / cuda / cpu
   interval: 60
-
+  low_freq_type: factor_k1h
+  mid_freq_type: factor_k5m
+  prefetch_factor: 0
   # 学习率调度
-  lr_scheduler:
-    patience: 5
-    factor: 0.5
-    min_lr: 1e-6
-
-  # 早停（可选）
-  early_stopping:
-    patience: 10
-    min_delta: 1e-5
+  lr: 0.0002
+  weight_decay: 0.001
+  label_start: 6
+  label_end: 8
+  label_type: ls1_labels
+  alphas:
+    - 0.9
+# ==========================================
+# 回调与保存
+# ==========================================
+callbacks:
+  save_dir: "checkpoints/exp_m4_v1"  # 所有输出（模型、日志、CSV、test结果）保存目录
+  patience: 3                    # 早停耐心值：验证 loss 连续 5 轮不下降则停止

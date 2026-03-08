@@ -23,22 +23,21 @@ model:
     dnn1:
       name: "lf_dnn1"
       hidden_dims_list:
-        - [ 32, 64, 128 ]                   #
-        - [ 16, 64, 128 ]                   #
+        - [ 32, 64 ]                   #
+        - [ 16, 64 ]                   #
       hidden_dims_nums:
-        - [2, 2, 2 ]                      #
-        - [2, 2, 2 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.1
-      dropouts: [ 0.1, 0.1 ]           #
-      use_layer_norms: [ false, false ]   #
+        - [40, 30]                      #
+        - [40, 30]
+      activations: [ relu, relu ]       #
+      dropouts: [ 0.1, 0.15 ]           #
+      use_layer_norms: [ true, true ]   #
       aggregation_method: concat      #concat / sum / mean / max
 
     cnn:
       name: "lf_cnn"
       hidden_dims_list:
-        - [ 128, 256, 256 ]           #
-        - [ 128, 128, 256 ]           #
+        - [ 64, 128, 128 ]           #
+        - [ 64, 64, 128 ]           #
       kernel_sizes_list:
         - [ 3, 5, 7 ]                 
         - [ 5, 7, 14 ]
@@ -48,27 +47,26 @@ model:
     dnn2:
       name: "lf_dnn2"
       hidden_dims_list:
-        - [ 512, 256, 128]                #
-        - [ 384, 256, 128]                #
+        - [ 256, 64]                #
+        - [ 128, 64]                #
       hidden_dims_nums:
-        - [ 2, 2, 2 ]                    #
-        - [ 2, 2, 2 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.1
-      dropouts: 0.3                 #
+        - [16, 32 ]                    # 
+        - [16, 32 ]
+      activations: relu             # 
+      dropouts: 0.2                 # 
       use_layer_norms: true         # 
       aggregation_method: concat       #
 
     rnn:
       name: "lf_rnn"
       rnn_types: [ gru, gru ]            
-      hidden_dims: [ 256, 128 ]       
-      num_layers_list: [ 2, 4 ]       
+      hidden_dims: [ 128, 64 ]       
+      num_layers_list: [ 8, 16 ]       
       dropout_list: [ 0.2, 0.2 ]      #
       aggregation_method: concat      #
       use_attention_aggregation: false  #
 
-    out_puts: [256, 256, 128, 128, 128, 64, 64, 64]           
+    out_puts: [128, 128, 128, 128, 128, 64, 64, 64, 64, 64]           
     return_sequences: false           #
 
   mid_freq:
@@ -91,11 +89,10 @@ model:
         - [ 32, 64, 128 ]                   # 
         - [ 64, 96, 128 ]                   #
       hidden_dims_nums:
-        - [ 2, 2, 3 ]                      #
-        - [ 2, 2, 3 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.1
-      dropouts: [ 0.1, 0.1 ]           #
+        - [ 20, 8, 3 ]                      # 
+        - [ 10, 6, 3 ]
+      activations: [ relu, relu ]       # 
+      dropouts: [ 0.1, 0.15 ]           # 
       use_layer_norms: [ true, true ]   #
       aggregation_method: concat      # concat / sum / mean / max
 
@@ -118,21 +115,20 @@ model:
       hidden_dims_nums:
         - [ 1, 2, 8 ]                    #
         - [ 1, 2, 8 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.01
-      dropouts: 0.3                 #
+      activations: relu             # 
+      dropouts: 0.2                 #
       use_layer_norms: true         #
       aggregation_method: sum       # 
 
     rnn:
       name: "mf_rnn"
       rnn_types: [ gru, gru ]            #
-      hidden_dims: [ 256, 128 ]       # 
-      num_layers_list: [ 2, 4 ]       #
+      hidden_dims: [ 128, 64 ]       # 
+      num_layers_list: [ 8, 16 ]       #
       dropout_list: [ 0.3, 0.3 ]      #
       aggregation_method: concat      #
       use_attention_aggregation: false  #
-    out_puts: [ 256, 128, 64 ]           # 
+    out_puts: [ 128, 128]           # 
     return_sequences: false           #
 
   classification:
@@ -163,8 +159,8 @@ class_config:
 
 training:
   seed: 1111                   
-  batch_size: 2
-  num_epochs: 10
+  batch_size: 32              
+  num_epochs: 3
   grad_clip: 1.0                
   device: "auto"                
   interval: 300
@@ -182,5 +178,5 @@ training:
 # ==========================================
 # ==========================================
 callbacks:
-  save_dir: "checkpoints/exp_m4_big_and_deep3"  
+  save_dir: "checkpoints/exp_m4_thin_and_long"  
   patience: 3                 

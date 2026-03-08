@@ -26,12 +26,11 @@ model:
         - [ 32, 64, 128 ]                   #
         - [ 16, 64, 128 ]                   #
       hidden_dims_nums:
-        - [2, 2, 2 ]                      #
-        - [2, 2, 2 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.1
-      dropouts: [ 0.1, 0.1 ]           #
-      use_layer_norms: [ false, false ]   #
+        - [32, 20, 8 ]                      #
+        - [32, 20, 8 ]
+      activations: [ relu, relu ]       #
+      dropouts: [ 0.1, 0.15 ]           #
+      use_layer_norms: [ true, true ]   #
       aggregation_method: concat      #concat / sum / mean / max
 
     cnn:
@@ -51,11 +50,10 @@ model:
         - [ 512, 256, 128]                #
         - [ 384, 256, 128]                #
       hidden_dims_nums:
-        - [ 2, 2, 2 ]                    #
-        - [ 2, 2, 2 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.1
-      dropouts: 0.3                 #
+        - [ 4, 8, 15 ]                    # 
+        - [ 4, 8, 15 ]
+      activations: relu             # 
+      dropouts: 0.2                 # 
       use_layer_norms: true         # 
       aggregation_method: concat       #
 
@@ -91,11 +89,10 @@ model:
         - [ 32, 64, 128 ]                   # 
         - [ 64, 96, 128 ]                   #
       hidden_dims_nums:
-        - [ 2, 2, 3 ]                      #
-        - [ 2, 2, 3 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.1
-      dropouts: [ 0.1, 0.1 ]           #
+        - [ 20, 8, 3 ]                      # 
+        - [ 10, 6, 3 ]
+      activations: [ relu, relu ]       # 
+      dropouts: [ 0.1, 0.15 ]           # 
       use_layer_norms: [ true, true ]   #
       aggregation_method: concat      # concat / sum / mean / max
 
@@ -118,9 +115,8 @@ model:
       hidden_dims_nums:
         - [ 1, 2, 8 ]                    #
         - [ 1, 2, 8 ]
-      activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.01
-      dropouts: 0.3                 #
+      activations: relu             # 
+      dropouts: 0.2                 #
       use_layer_norms: true         #
       aggregation_method: sum       # 
 
@@ -163,8 +159,8 @@ class_config:
 
 training:
   seed: 1111                   
-  batch_size: 2
-  num_epochs: 10
+  batch_size: 64              
+  num_epochs: 3
   grad_clip: 1.0                
   device: "auto"                
   interval: 300
@@ -177,10 +173,10 @@ training:
   label_end: 8
   label_type: ls1_labels
   alphas:
-    - 0.91
-    - 0.91
+    - 0.95
+    - 0.95
 # ==========================================
 # ==========================================
 callbacks:
-  save_dir: "checkpoints/exp_m4_big_and_deep3"  
+  save_dir: "checkpoints/exp_m4_amplify_pos1"  
   patience: 3                 

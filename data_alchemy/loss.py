@@ -208,7 +208,7 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         # 负样本：1倍
         multiplier = torch.where(
             targets == 1,
-            self.alphas.clone().detach(),
+            self.alphas.clone().detach().to(logits.device),
             torch.tensor(1., device=logits.device)
         )
         amplified_loss = base_loss * multiplier
@@ -243,7 +243,7 @@ class MultiHeadBinaryFocalLoss(nn.Module):
             tp = (preds[:, h] & targets[:, h]).sum().item()
             fp = (preds[:, h] & ~targets[:, h]).sum().item()
             fn = (~preds[:, h] & targets[:, h]).sum().item()
-
+            print(f"tp={tp}, fp={fp}, fn={fn}")
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0

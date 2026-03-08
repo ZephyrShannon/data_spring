@@ -1,0 +1,18 @@
+# config.yaml
+download:
+  base_dir: "data2"               # 下载根目录
+  biz: ["spot"]     # 支持多个 biz
+  market: ["XRP_USDT"] # 支持多个 market
+  types:
+    - "deals"
+    - "candlesticks_30s"
+    - "candlesticks_1m"
+    - "candlesticks_5m"
+    - "orderbooks"
+  start_date: "2024-10-01 00:00"  # 开始时间（本地时间，脚本自动转为UTC）
+  end_date: "2025-11-01 00:00"    # 结束时间（本地时间）
+
+logging:
+  log_dir: "./spot_logs"
+
+history_file: "./spot_history.log"

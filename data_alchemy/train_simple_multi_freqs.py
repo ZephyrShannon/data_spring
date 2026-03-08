@@ -1,5 +1,6 @@
 # train.py
 import csv
+import gc
 import json
 import logging
 import os
@@ -8,11 +9,13 @@ from typing import Optional, List
 
 import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLoss
+from data_alchemy.simple_stack_model import MultiFreqMultiLabelClassifier
 from data_loader.data_loader import *  # 你已实现
+
 
 def get_device():
     if torch.backends.mps.is_available():
@@ -103,7 +106,7 @@ def test_data(config, data_dir, market, start_time, end_time):
     train_cfg = config["training"]
     model_cfg = config['model']
     device = get_device()
-    print(f"使用设备: {device}")
+    print(f"Use device: {device}")
     total_duration = end_time - start_time
 
     save_dir = config["callbacks"]["save_dir"]
@@ -217,6 +220,7 @@ def get_data_set(data_dir, biz, lb_data_type, market, start_time, end_time, inte
 
 from typing import Dict
 import torch
+import tracemalloc
 
 
 def calculate_accuracy_precision_recall_per_class(
@@ -308,11 +312,104 @@ def calculate_accuracy_precision_recall_per_class(
     return result_dict
 
 
+class MemTracker:
+    def __init__(self, name: str, snapshot=None):
+        if snapshot is None:
+            gc.collect()
+            #snapshot = tracemalloc.take_snapshot()
+        self.name = name
+        self.snapshot = snapshot
+
+    def record(self, hints: str, logger):
+        gc.collect()
+        return
+        '''
+        snapshot_now = tracemalloc.take_snapshot()
+        top_stats = snapshot_now.compare_to(self.snapshot, 'traceback')
+        logger.info(f"MemTracker[{self.name}][{hints}]:")
+        for stat in top_stats[:10]:
+            trace_lines = stat.traceback.format()
+            if any('/data_spring/' in line for line in trace_lines):
+                logger.info(f"{stat}")
+                tracebacks = '\n'.join(stat.traceback.format())
+                logger.info(f"{tracebacks}")
+        self.snapshot = snapshot_now
+        '''
+
+
+def check_model_gradients_by_component(model, logger):
+    """
+    按组件检查梯度（针对你的模型结构）
+    """
+    components = {
+        'dnn1': [],
+        'cnn': [],
+        'dnn2': [],
+        'film': [],  # FiLM层
+        'rnn': [],
+        'output_head': [],
+        'residual': []
+    }
+
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+
+        grad_norm = param.grad.norm(2).item()
+
+        # 根据参数名分类
+        if 'lf_extractor.dnn1' in name:
+            components['dnn1'].append(grad_norm)
+        elif 'lf_extractor.cnn' in name:
+            components['cnn'].append(grad_norm)
+        elif 'dnn2' in name:
+            components['dnn2'].append(grad_norm)
+        elif 'film' in name.lower():
+            components['film'].append(grad_norm)
+        elif 'rnn' in name:
+            components['rnn'].append(grad_norm)
+        elif 'output_head' in name or 'label_heads' in name:
+            components['output_head'].append(grad_norm)
+        elif 'out_residual' in name:
+            components['residual'].append(grad_norm)
+
+    logger.info(f"\n=== {model.name}各组件梯度统计 ===")
+    logger.info("组件      | 平均梯度   | 最小梯度   | 最大梯度   | 层数")
+    logger.info("-" * 60)
+
+    for comp_name, grads in components.items():
+        if grads:
+            avg_grad = sum(grads) / len(grads)
+            min_grad = min(grads)
+            max_grad = max(grads)
+            logger.info(f"{comp_name:10s} | {avg_grad:.6f} | {min_grad:.6f} | {max_grad:.6f} | {len(grads):3d}")
+
+    # 检查梯度消失链（从输出到输入）
+    logger.info("\n=== 梯度流检查（从输出到输入）===")
+    flow_order = ['output_head', 'rnn', 'dnn2', 'cnn', 'dnn1']
+    prev_avg = None
+
+    for comp in flow_order:
+        if components[comp]:
+            avg_grad = sum(components[comp]) / len(components[comp])
+            if prev_avg is not None:
+                ratio = avg_grad / prev_avg if prev_avg > 0 else 0
+                logger.info(f"{comp:10s} -> {comp} 梯度衰减比: {ratio:.4f}")
+            else:
+                logger.info(f"{comp:10s} 平均梯度: {avg_grad:.6f}")
+            prev_avg = avg_grad
+
+    return components
+
 def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None, estimate=False):
     train_cfg = config["training"]
     model_cfg = config['model']
+
+    tracemalloc.start(25)
+    procedure_tracker = MemTracker("procedure")
+    overall_tracker = MemTracker("overall", procedure_tracker.snapshot)
     device = get_device()
-    print(f"使用设备: {device}")
+    print(f"Use device: {device}")
     total_duration = end_time - start_time
 
     save_dir = config["callbacks"]["save_dir"]
@@ -325,6 +422,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     # 推荐：固定验证/测试时长（更合理），或按比例
     val_ratio = train_cfg.get('val_ratio', 0.04)
     test_ratio = train_cfg.get('test_ratio', 0.012)
+    print(f"Val ratio: {val_ratio}, test_ratio: {test_ratio}")
 
     low_freq_type = train_cfg.get("low_freq_type", "factor_k1h")
     mid_freq_type = train_cfg.get("mid_freq_type", "factor_k5m")
@@ -336,8 +434,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_duration = total_duration * test_ratio
     val_duration = datetime.timedelta(seconds=int((val_duration.total_seconds()) // 3600) * 3600)
     test_duration = datetime.timedelta(seconds=int((test_duration.total_seconds()) // 3600) * 3600)
-    max_duration = datetime.timedelta(days=7)
-    min_duration = datetime.timedelta(hours=1)
+    max_duration = datetime.timedelta(days=30)
+    min_duration = datetime.timedelta(hours=2)
     if val_duration > max_duration:
         val_duration = max_duration
     if val_duration < min_duration:
@@ -355,7 +453,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     val_end = test_start
     test_end = end_time
     interval = train_cfg.get('interval', 60)
-    seq_len = model_cfg['low_freq']['seq_len']
+    seq_len = model_cfg['low_freq']['input_seq_len']
     criterion = MultiHeadBinaryFocalLoss(alphas=alphas)
 
     prefetch = train_cfg.get('prefetch_factor', 1)
@@ -380,7 +478,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     train_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, train_start, train_end,
                                  interval, seq_len, mid_freq_type, low_freq_type, label_cols)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                              prefetch_factor=prefetch, pin_memory=True)
+                              prefetch_factor=prefetch)
 
     # 验证集（用于早停和调参）
     print(f"Val data: {val_start}-{train_end}, interval: {interval}")
@@ -388,7 +486,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                                seq_len, mid_freq_type, low_freq_type,
                                label_cols)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                            prefetch_factor=prefetch, pin_memory=True)
+                            prefetch_factor=prefetch)
 
     # 测试集（仅最后评估一次）
     print(f"Test data: {test_start}-{test_end} seq_len: {seq_len}")
@@ -396,7 +494,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                                 seq_len, mid_freq_type, low_freq_type,
                                 label_cols)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                             prefetch_factor=prefetch, pin_memory=True)
+                             prefetch_factor=prefetch)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -410,7 +508,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     labels = ['long_1min', 'short_1min', 'long_3min', 'short_3min', 'long_5min',
               'short_5min', "long_15min", 'short_15min', "long_30min", 'short_30min']
     selected_labels = labels[label_start:label_end]
-    fieldnames = ["epoch", "train_loss", "val_loss"]
+    fieldnames = ["epoch", "train_loss", "val_loss", "total_norm", "negative_num", "negative_mean", "mid_num",
+                  "mid_mean", "positive_num", "positive_mean"]
     log_indies = []
     for scale in selected_labels:
         scale_index = [f"{scale}_prec", f"{scale}_reca", f"{scale}_f1"]
@@ -428,8 +527,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     # === 随机种子 ===
     torch.manual_seed(config["training"]["seed"])
 
-    from data_alchemy.simple_stack_model_config import create_model_from_config
-    model = create_model_from_config(config_dict=config)
+    model = MultiFreqMultiLabelClassifier(**(config['model']))
 
     # Model
     # === 优化器 & 调度器 ===
@@ -438,11 +536,17 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         lr=config["training"]["lr"],
         weight_decay=config["training"]["weight_decay"]
     )
-    scheduler = MultiStepLR(
+    # 方案1：ReduceLROnPlateau（根据验证损失调整）
+    scheduler = ReduceLROnPlateau(
         optimizer,
-        milestones=[1,2,5,10,15,30],  # 在这些epoch降低
-        gamma=0.5  # 每次乘以0.5
+        mode='min',
+        factor=0.5,  # 每次乘以0.5
+        patience=2,  # 验证损失3个epoch不下降才降低
+        threshold=1e-4,  # 最小改善阈值
+        cooldown=1,  # 降低后等待1个epoch再继续监控
+        min_lr=1e-6  # 最小学习率
     )
+
 
     best_val_loss = float("inf")
     patience_counter = 0
@@ -452,7 +556,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     if resume_from and os.path.exists(resume_from):
         logger.info(f".Resume training from: {resume_from}")
-        checkpoint = torch.load(resume_from, map_location=device, weights_only=True)
+        checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint.get("epoch", -1) + 1
@@ -473,55 +577,60 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     class_weights = create_fixed_class_weights()
     class_weights = {k: v.to(device) for k, v in class_weights.items()}
     total_batchs = (len(train_dataset) + batch_size - 1) // batch_size
-
+    print(f"Total train batchs: {total_batchs}")
     break_on_debug = False
+    procedure_tracker.record("Start_Epoch", logger)
     for epoch in range(start_epoch, epochs):
+        epoch_tracker = MemTracker("epoch_tracker", procedure_tracker.snapshot)
         # --- Train ---
         model.train()
         total_train_loss = 0.0
-        total_reg_loss = 0.0
+        # total_reg_loss = 0.0
         cur_batch = 0
         start_time = datetime.datetime.now()
-        #model.update_epoch(epoch)
+        # model.update_epoch(epoch)
         gamma = 1. + min(1.0, epoch / 5)
         criterion.gamma = gamma
         if not estimate:
             for batch in train_loader:
                 x_mid, x_low, labels = [b.to(device) for b in batch]
                 optimizer.zero_grad()
-
-                if epoch > 3:
-                    reg_ratio = 0.05
-                else:
-                    reg_ratio = 0.1
-                # 从第1个epoch开始检查是否需要正则化
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
-                total_train_loss += loss
+                loss_val = loss.item()
+                total_train_loss += loss_val
                 optimizer.zero_grad()
                 loss.backward()
-                if grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                #if grad_clip > 0:
+                #    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
                 cur_batch += 1
                 end_time = datetime.datetime.now()
-                print(f"[{cur_batch}/{total_batchs}] cost: {end_time - start_time}")
-                start_time = end_time
-
                 if break_on_debug:
                     logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
                     break
+                else:
+                    if (cur_batch % 300 == 0) or ( cur_batch == 1):
+                        check_model_gradients_by_component(model.lf_extractor, logger)
+                        check_model_gradients_by_component(model.mf_extractor, logger)
+                    else:
+                        end_time = datetime.datetime.now()
+                        # epoch_tracker.record(f"Train[{epoch},{cur_batch}]", logger)
+                        print(
+                            f"[{cur_batch}/{total_batchs}] cost: {end_time - start_time}, loss = {loss_val}, mean_loss:{total_train_loss / cur_batch}")
+                        start_time = end_time
+
             avg_train_loss = total_train_loss / cur_batch
-            avg_reg_loss = total_reg_loss / cur_batch
         else:
             avg_train_loss = 0
-            avg_reg_loss = 0
 
+        procedure_tracker.record(f"Train[{epoch}] ends.",logger)
         # --- Validate ---
         model.eval()
         total_val_loss = 0.0
         all_val_details = {}
         # collected_pred_details = defaultdict(list)
+
         with torch.no_grad():
             all_val_details = {}
             all_probs_list = []
@@ -533,7 +642,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 details = criterion.compute_metrics_per_head(logits, labels)
-                total_val_loss += loss
+                total_val_loss += loss.item()
                 # 累积 loss 和 accuracy（保持你原有逻辑）
                 for i in range(len(log_indies)):
                     scale_names = log_indies[i]
@@ -544,10 +653,14 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                     all_logits_list.append(logits.cpu().numpy())
                     all_probs_list.append(torch.sigmoid(logits).cpu().numpy())  # 转概率
                     all_labels_list.append(labels.cpu().numpy())
+                else:
+                    all_probs_list.append(torch.sigmoid(logits).cpu().numpy())  # 转概率
+
                     # 转换为 CPU numpy 数组
                 if break_on_debug:
                     logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
                     break
+
             if estimate:
                 # 合并所有 batch 的数据
                 all_logits = np.vstack(all_logits_list)  # (N, S)
@@ -565,16 +678,65 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 # 保存
                 os.makedirs(save_dir, exist_ok=True)
                 df.to_csv(os.path.join(save_dir, "val_predictions.csv"), index=False)
-                print(f"Saved {len(df)} validation samples to {save_dir}/val_predictions.csv")
+                logger.info(f"Saved {len(df)} validation samples to {save_dir}/val_predictions.csv")
+            else:
+                all_probs = np.vstack(all_probs_list)  # (N, S)
+                logger.info(f"Probs - min: {all_probs.min():.4f}, max: {all_probs.max():.4f}, "
+                      f"mean: {all_probs.mean():.4f}, std: {all_probs.std():.4f}")
+            less_02 = all_probs < 0.25
+            num_less_02 = less_02.sum()
+            if num_less_02 < 1:
+                mean_less_02 = 0.0
+            else:
+                mean_less_02 = all_probs[less_02].mean()
+            larger_08 = all_probs > 0.75
+            num_larger_08 = larger_08.sum()
+            if num_larger_08 < 1:
+                mean_larger_08 = 0.0
+            else:
+                mean_larger_08 = all_probs[larger_08].mean()
+            mid = ((all_probs >= 0.4) & (all_probs <= 0.6))
+            num_mid = mid.sum()
+            mean_mid = all_probs[mid].mean()
+            total_prob = all_probs.shape[0]
+
+            logger.info(f"Probability distribution: [0-0.2]: [{mean_less_02},{num_less_02}], "
+                        f"[0.2-0.8]: [{mean_mid},{num_mid}] "
+                        f"[>0.8]: [{mean_larger_08},{num_larger_08}]")
 
         avg_val_loss = total_val_loss / len(val_loader)
+        # 在每个验证步骤后调用
+        scheduler.step(avg_val_loss)
 
-        scheduler.step(epoch)
+        total_norm = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        print(f"Gradient norm: {total_norm:.6f}")
+
+        # 2. 梯度消失时：检查激活函数、初始化、添加残差连接
+        if total_norm < 1e-4:
+            # 检查是否有梯度消失
+            print("Warning: Gradients are vanishing!")
+            # 考虑：使用LeakyReLU替代ReLU，检查初始化，添加skip connection
+
+        # 3. 梯度爆炸时：加强梯度裁剪
+        if total_norm > 100:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         log_dict = {
             "epoch": epoch + 1,
-            "train_loss": round(avg_train_loss.item(), 6),
-            "val_loss": round(avg_val_loss.item(), 6),
+            "train_loss": round(avg_train_loss, 6),
+            "val_loss": round(avg_val_loss, 6),
+            "total_norm": round(total_norm, 6),
+            "negative_num": round(num_less_02,1),
+            "negative_mean": round(mean_less_02, 6),
+            "mid_num": round(num_mid, 1),
+            "mid_mean": round(mean_mid, 6),
+            "positive_num": round(num_larger_08, 1),
+            "positive_mean": round(mean_larger_08, 6),
             **{k: v / len(test_loader) for k, v in all_val_details.items()},
         }
 
@@ -584,7 +746,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             writer.writerow(log_dict)
 
         logger.info(
-            f"Epoch {epoch + 1}/{epochs} | Train Loss: {avg_train_loss:.6f}+{avg_reg_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
+            f"Epoch {epoch + 1}/{epochs} | Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}")
         if estimate:
             break
         if avg_val_loss < best_val_loss:
@@ -609,12 +771,15 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
             os.remove(os.path.join(save_dir, "epoch.stop"))  # 可选：自动清理
             break
+        else:
+            procedure_tracker.record(f"Validation[{epoch} ends", logger)
 
     # ==========================================
     # 🔚 训练结束 → 加载最佳模型并在 test 集评估
     # ==========================================
     logger.info("Loading best model for test evaluation...")
-    checkpoint = torch.load(os.path.join(save_dir, "best_model.pth"), map_location=device, weights_only=True)
+    checkpoint = torch.load(os.path.join(save_dir, "best_model.pth"), map_location=device, weights_only=False
+                            )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -627,7 +792,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             x_mid, x_low, labels = [b.to(device) for b in batch]
             logits = model(x_low, x_mid)
             loss = criterion(logits, labels)
-            total_test_loss += loss
+            total_test_loss += loss.item()
             details = criterion.compute_metrics_per_head(logits, labels)
 
             # 累积 loss
@@ -649,7 +814,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     # 构建最终结果
     test_metrics = {
-        "test_loss": round(avg_test_loss.item(), 6),
+        "test_loss": round(avg_test_loss, 6),
         "subtask_losses": {k: round(v, 6) for k, v in all_test_details.items()},
     }
 
@@ -667,7 +832,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         logger.info(f"  {k}: {v:.6f}")
     logger.info("=" * 50)
     logger.info(f"Test results saved to: {test_result_file}")
-
+    overall_tracker.record("Over all mem", logger)
     return test_metrics
 
 
@@ -675,4 +840,4 @@ if __name__ == "__main__":
     main()
     pass
 
-#test_train()
+# test_train()

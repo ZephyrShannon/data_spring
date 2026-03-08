@@ -30,8 +30,8 @@ model:
         - [2, 2, 2 ]
       activations: [ leaky_relu, leaky_relu ]       #
       leaky_alpha: 0.1
-      dropouts: [ 0.1, 0.1 ]           #
-      use_layer_norms: [ false, false ]   #
+      dropouts: [ 0.1, 0.15 ]           #
+      use_layer_norms: [ true, true ]   #
       aggregation_method: concat      #concat / sum / mean / max
 
     cnn:
@@ -51,11 +51,11 @@ model:
         - [ 512, 256, 128]                #
         - [ 384, 256, 128]                #
       hidden_dims_nums:
-        - [ 2, 2, 2 ]                    #
-        - [ 2, 2, 2 ]
+        - [ 1, 2, 1 ]                    #
+        - [ 1, 2, 1 ]
       activations: [ leaky_relu, leaky_relu ]       #
       leaky_alpha: 0.1
-      dropouts: 0.3                 #
+      dropouts: 0.2                 # 
       use_layer_norms: true         # 
       aggregation_method: concat       #
 
@@ -63,12 +63,12 @@ model:
       name: "lf_rnn"
       rnn_types: [ gru, gru ]            
       hidden_dims: [ 256, 128 ]       
-      num_layers_list: [ 2, 4 ]       
+      num_layers_list: [ 1, 2 ]       
       dropout_list: [ 0.2, 0.2 ]      #
       aggregation_method: concat      #
       use_attention_aggregation: false  #
 
-    out_puts: [256, 256, 128, 128, 128, 64, 64, 64]           
+    out_puts: [256, 128, 128, 128, 64, 64, 64]           
     return_sequences: false           #
 
   mid_freq:
@@ -91,11 +91,11 @@ model:
         - [ 32, 64, 128 ]                   # 
         - [ 64, 96, 128 ]                   #
       hidden_dims_nums:
-        - [ 2, 2, 3 ]                      #
-        - [ 2, 2, 3 ]
+        - [ 20, 10, 5 ]                      #
+        - [ 20, 10, 5 ]
       activations: [ leaky_relu, leaky_relu ]       #
       leaky_alpha: 0.1
-      dropouts: [ 0.1, 0.1 ]           #
+      dropouts: [ 0.1, 0.15 ]           # 
       use_layer_norms: [ true, true ]   #
       aggregation_method: concat      # concat / sum / mean / max
 
@@ -116,11 +116,11 @@ model:
         - [ 512, 256, 128 ]                #
         - [ 384, 256, 128 ]                #
       hidden_dims_nums:
-        - [ 1, 2, 8 ]                    #
-        - [ 1, 2, 8 ]
+        - [ 20, 10, 5 ]                      #
+        - [ 20, 10, 5 ]
       activations: [ leaky_relu, leaky_relu ]       #
-      leaky_alpha: 0.01
-      dropouts: 0.3                 #
+      leaky_alpha: 0.1
+      dropouts: 0.2                 #
       use_layer_norms: true         #
       aggregation_method: sum       # 
 
@@ -128,7 +128,7 @@ model:
       name: "mf_rnn"
       rnn_types: [ gru, gru ]            #
       hidden_dims: [ 256, 128 ]       # 
-      num_layers_list: [ 2, 4 ]       #
+      num_layers_list: [ 10, 5 ]       #
       dropout_list: [ 0.3, 0.3 ]      #
       aggregation_method: concat      #
       use_attention_aggregation: false  #
@@ -137,7 +137,7 @@ model:
 
   classification:
     num_labels: 2
-    per_label_hidden_dims: [128, 64, 64, 32, 32, 32, 32,  16, 16, 16, 16]
+    per_label_hidden_dims: [64, 32, 16, 8 ]
     label_dropout: 0.2
     use_batch_norm: true
     threshold: 0.5
@@ -163,13 +163,13 @@ class_config:
 
 training:
   seed: 1111                   
-  batch_size: 2
-  num_epochs: 10
+  batch_size: 32
+  num_epochs: 8
   grad_clip: 1.0                
   device: "auto"                
   interval: 300
   low_freq_type: factor_k1h
-  mid_freq_type: factor_k5m
+  mid_freq_type: factor_k1m
   prefetch_factor: 1
   lr: 0.002
   weight_decay: 0.001
@@ -182,5 +182,5 @@ training:
 # ==========================================
 # ==========================================
 callbacks:
-  save_dir: "checkpoints/exp_m4_big_and_deep3"  
-  patience: 3                 
+  save_dir: "checkpoints/model_test_deep_rnn_deep1"
+  patience: 5                 

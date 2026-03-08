@@ -395,7 +395,6 @@ def normalize_hfd(hf_data: pd.DataFrame):
 class HourlyCache:
     def __init__(self, data_dir: str, market: str, data_type: str, need_1hour=True):
         self.cache_data_now = None
-        self.cache_data_last = None
         self.cache_data_merged = None
         self.cache_date_now: [datetime.datetime | None] = None
         self.cache_date_last: [datetime.datetime | None] = None
@@ -408,9 +407,6 @@ class HourlyCache:
         if is_same_hour(self.cache_date_now, dt):
             if self.cache_data_now is not None:
                 return self.cache_data_now
-        if is_same_hour(self.cache_date_last, dt):
-            if self.cache_data_last is not None:
-                return self.cache_data_last
         try:
             data = load_hourly_data(self.data_dir, self.market, dt, self.data_type)
             if data is None:
@@ -464,7 +460,8 @@ class HourlyCache:
             cache_data_last = None
 
         if cache_data_last is not None:
-            cache_data_merged = pd.concat([cache_data_last, cache_data_now])
+            cache_data_merged = pd.concat([cache_data_last, cache_data_now]).copy()
+            del cache_data_last
         else:
             cache_data_merged = cache_data_now.copy()
         cache_data_merged = cache_data_merged.ffill()
@@ -478,7 +475,6 @@ class HourlyCache:
 
         self.cache_data_now = cache_data_now
         self.cache_date_now = cache_date_now
-        self.cache_data_last = cache_data_last
         self.cache_date_last = cache_date_last
         self.cache_data_merged = cache_data_merged
         return cache_data_merged
