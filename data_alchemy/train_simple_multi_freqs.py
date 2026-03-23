@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR, ReduceLROnP
 from torch.utils.data import DataLoader
 
 from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLoss
+from data_alchemy.optimize_utils.find_learning_rate import find_best_lr, get_best_lr
 from data_alchemy.simple_stack_model import MultiFreqMultiLabelClassifier
 from data_loader.data_loader import *  # 你已实现
 
@@ -322,7 +323,6 @@ class MemTracker:
 
     def record(self, hints: str, logger):
         gc.collect()
-        return
         '''
         snapshot_now = tracemalloc.take_snapshot()
         top_stats = snapshot_now.compare_to(self.snapshot, 'traceback')
@@ -342,15 +342,17 @@ def check_model_gradients_by_component(model, logger):
     按组件检查梯度（针对你的模型结构）
     """
     components = {
-        'dnn1': [],
-        'cnn': [],
-        'dnn2': [],
-        'film': [],  # FiLM层
-        'rnn': [],
-        'output_head': [],
-        'residual': []
+        'lf_extractor.dnn1': [],
+        'lf_extractor.cnn': [],
+        'lf_extractor.dnn2': [],
+        'lf_extractor.rnn': [],
+        'lf_extractor.output_head': [],
+        'mf_extractor.dnn1': [],
+        'mf_extractor.cnn': [],
+        'mf_extractor.dnn2': [],
+        'mf_extractor.rnn': [],
+        'mf_extractor.output_head': [],
     }
-
     for name, param in model.named_parameters():
         if param.grad is None:
             continue
@@ -359,19 +361,25 @@ def check_model_gradients_by_component(model, logger):
 
         # 根据参数名分类
         if 'lf_extractor.dnn1' in name:
-            components['dnn1'].append(grad_norm)
+            components['lf_extractor.dnn1'].append(grad_norm)
         elif 'lf_extractor.cnn' in name:
-            components['cnn'].append(grad_norm)
-        elif 'dnn2' in name:
-            components['dnn2'].append(grad_norm)
-        elif 'film' in name.lower():
-            components['film'].append(grad_norm)
-        elif 'rnn' in name:
-            components['rnn'].append(grad_norm)
-        elif 'output_head' in name or 'label_heads' in name:
-            components['output_head'].append(grad_norm)
-        elif 'out_residual' in name:
-            components['residual'].append(grad_norm)
+            components['lf_extractor.cnn'].append(grad_norm)
+        elif 'lf_extractor.dnn2' in name:
+            components['lf_extractor.dnn2'].append(grad_norm)
+        elif 'lf_extractor.rnn' in name:
+            components['lf_extractor.rnn'].append(grad_norm)
+        elif 'lf_extractor.output_head' in name:
+            components['lf_extractor.output_head'].append(grad_norm)
+        if 'mf_extractor.dnn1' in name:
+            components['mf_extractor.dnn1'].append(grad_norm)
+        elif 'mf_extractor.cnn' in name:
+            components['mf_extractor.cnn'].append(grad_norm)
+        elif 'mf_extractor.dnn2' in name:
+            components['mf_extractor.dnn2'].append(grad_norm)
+        elif 'mf_extractor.rnn' in name:
+            components['mf_extractor.rnn'].append(grad_norm)
+        elif 'mf_extractor.output_head' in name:
+            components['mf_extractor.output_head'].append(grad_norm)
 
     logger.info(f"\n=== {model.name}各组件梯度统计 ===")
     logger.info("组件      | 平均梯度   | 最小梯度   | 最大梯度   | 层数")
@@ -383,22 +391,6 @@ def check_model_gradients_by_component(model, logger):
             min_grad = min(grads)
             max_grad = max(grads)
             logger.info(f"{comp_name:10s} | {avg_grad:.6f} | {min_grad:.6f} | {max_grad:.6f} | {len(grads):3d}")
-
-    # 检查梯度消失链（从输出到输入）
-    logger.info("\n=== 梯度流检查（从输出到输入）===")
-    flow_order = ['output_head', 'rnn', 'dnn2', 'cnn', 'dnn1']
-    prev_avg = None
-
-    for comp in flow_order:
-        if components[comp]:
-            avg_grad = sum(components[comp]) / len(components[comp])
-            if prev_avg is not None:
-                ratio = avg_grad / prev_avg if prev_avg > 0 else 0
-                logger.info(f"{comp:10s} -> {comp} 梯度衰减比: {ratio:.4f}")
-            else:
-                logger.info(f"{comp:10s} 平均梯度: {avg_grad:.6f}")
-            prev_avg = avg_grad
-
     return components
 
 def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None, estimate=False):
@@ -515,10 +507,11 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         scale_index = [f"{scale}_prec", f"{scale}_reca", f"{scale}_f1"]
         log_indies.append(scale_index)
         fieldnames += scale_index
-
-    with open(csv_file, "w", newline="", encoding="utf-8") as f:
+    csv_existed = os.path.exists(csv_file)
+    with open(csv_file, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
+        if not csv_existed:
+            writer.writeheader()
 
     if estimate:
         from data_alchemy.utils import MultiScaleClassificationMetrics
@@ -529,27 +522,46 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     model = MultiFreqMultiLabelClassifier(**(config['model']))
 
+    no_decay_param_names = []
+    normal_param = []
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.LayerNorm):
+            # LayerNorm 通常有 'weight' 和 'bias'
+            if hasattr(module, 'weight'):
+                no_decay_param_names.append(f"{name}.weight")
+            if hasattr(module, 'bias') and module.bias is not None:
+                no_decay_param_names.append(f"{name}.bias")
+        elif hasattr(module, 'bias') and module.bias is not None:
+            no_decay_param_names.append(f"{name}.bias")
+        else:
+            normal_param.append(f'{name}')
+
+    # 去重（虽然一般不会重复）
+    no_decay_param_names = list(set(no_decay_param_names))
+
+    # 构建 optimizer groups
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if n not in no_decay_param_names],
+            "weight_decay": 1e-4,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if n in no_decay_param_names],
+            "weight_decay": 0.0,
+        },
+    ]
     # Model
+    lr = config["training"]["lr"]
+    weight_decay = config["training"]["weight_decay"]
+    betas = config["training"].get("betas",  (0.9, 0.999))
     # === 优化器 & 调度器 ===
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config["training"]["lr"],
-        weight_decay=config["training"]["weight_decay"]
-    )
-    # 方案1：ReduceLROnPlateau（根据验证损失调整）
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,  # 每次乘以0.5
-        patience=2,  # 验证损失3个epoch不下降才降低
-        threshold=1e-4,  # 最小改善阈值
-        cooldown=1,  # 降低后等待1个epoch再继续监控
-        min_lr=1e-6  # 最小学习率
-    )
 
 
     best_val_loss = float("inf")
     patience_counter = 0
+
+
+    total_batchs = (len(train_dataset) + batch_size - 1) // batch_size
 
     if resume_from is None:
         resume_from = os.path.join(save_dir, "best_model.pth")
@@ -558,8 +570,20 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         logger.info(f".Resume training from: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        start_epoch = checkpoint.get("epoch", -1) + 1
+        if config.get('reuse_all', False):
+            lr = checkpoint.get('lr', lr)
+            optimizer = torch.optim.AdamW(
+                optimizer_grouped_parameters,
+                lr=lr, weight_decay=weight_decay,
+                betas=config['training'].get('betas', betas),
+                eps=1e-8
+            )
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            start_epoch = checkpoint.get("epoch", -1) + 1
+        else:
+            start_epoch = 0
+            optimizer = None
+
         best_val_loss = checkpoint.get("val_loss", float("inf"))
         logger.info(f".Resumed from epoch {start_epoch}, best val loss: {best_val_loss:.6f}")
         model_loaded = True
@@ -569,17 +593,47 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         if estimate:
             raise Exception("Model record not found! Estimating failed")
         start_epoch = 0
-        model_loaded = False
+        optimizer = None
+
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7, weight_decay=1e-4)
+
+        # 执行 LR 测试（只跑 1 个 epoch）
+        lrs, losses = find_best_lr(model, train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
+                                   device=device)
+
+        steepest_lr, recommended_lr = get_best_lr(lrs, losses, 30, 10);
+        logger.info(f"Find best learning rate: {recommended_lr}")
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters,
+            lr=recommended_lr, weight_decay=1e-4,
+            betas=config['training'].get('betas',betas),
+            eps=1e-8
+        )
+    else:
+        recommended_lr = lr
+
 
     epochs = config["training"]["num_epochs"]
+        # 推荐搭配 OneCycleLR
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=recommended_lr,
+        total_steps=len(train_loader) * epochs,
+        pct_start=0.3
+    )
+
     grad_clip = config["training"]["grad_clip"]
     class_config = config["class_config"]
     class_weights = create_fixed_class_weights()
     class_weights = {k: v.to(device) for k, v in class_weights.items()}
-    total_batchs = (len(train_dataset) + batch_size - 1) // batch_size
-    print(f"Total train batchs: {total_batchs}")
+
     break_on_debug = False
     procedure_tracker.record("Start_Epoch", logger)
+    logger.info(f"Start training, {start_epoch}/{epochs}")
+
+
+
     for epoch in range(start_epoch, epochs):
         epoch_tracker = MemTracker("epoch_tracker", procedure_tracker.snapshot)
         # --- Train ---
@@ -611,8 +665,12 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                     break
                 else:
                     if (cur_batch % 300 == 0) or ( cur_batch == 1):
-                        check_model_gradients_by_component(model.lf_extractor, logger)
-                        check_model_gradients_by_component(model.mf_extractor, logger)
+                        check_model_gradients_by_component(model, logger)
+                        model.print_gradient_decay_report(logger)
+                        model.mf_extractor.dnn2.print_gradient_analysis(logger, "mf_extractor.dnn2")
+                        model.mf_extractor.dnn1.print_gradient_analysis(logger, "mf_extractor.dnn1")
+                        model.lf_extractor.dnn2.print_gradient_analysis(logger, "lf_extractor.dnn2")
+                        model.lf_extractor.dnn1.print_gradient_analysis(logger, "lf_extractor.dnn1")
                     else:
                         end_time = datetime.datetime.now()
                         # epoch_tracker.record(f"Train[{epoch},{cur_batch}]", logger)
@@ -758,6 +816,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 'optimizer_state_dict': optimizer.state_dict(),
                 'config': config,
                 'val_loss': avg_val_loss,
+                'lr': recommended_lr,
             }, os.path.join(save_dir, "best_model.pth"))
             logger.info("New best model saved!")
         else:
@@ -819,7 +878,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     }
 
     # 保存 JSON
-    with open(test_result_file, "w", encoding="utf-8") as f:
+    with open(test_result_file, "a", encoding="utf-8") as f:
         json.dump(test_metrics, f, indent=4, ensure_ascii=False)
 
     # 打印报告

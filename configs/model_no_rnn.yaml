@@ -58,15 +58,6 @@ model:
       use_layer_norms: true         # 
       aggregation_method: concat       #
 
-    rnn:
-      name: "lf_rnn"
-      rnn_types: [ gru, gru ]            
-      hidden_dims: [ 256, 128 ]       
-      num_layers_list: [ 2, 4 ]       
-      dropout_list: [ 0.2, 0.2 ]      #
-      aggregation_method: concat      #
-      use_attention_aggregation: false  #
-
     out_puts:
       name: "lf_output"
       hidden_dims_list:
@@ -134,20 +125,12 @@ model:
       use_layer_norms: true         #
       aggregation_method: concat       #
 
-    rnn:
-      name: "mf_rnn"
-      rnn_types: [ gru, gru ]            #
-      hidden_dims: [ 256, 128 ]       # 
-      num_layers_list: [ 2, 2 ]       #
-      dropout_list: [ 0.2, 0.2 ]      #
-      aggregation_method: concat      #
-      use_attention_aggregation: false  #
     out_puts:
       name: "mf_dnn2"
       hidden_dims_list:
         - [ 256, 128, 64]                #
       hidden_dims_nums:
-        - [ 2, 4, 4 ]
+        - [ 2, 2, 2 ]
       activations: [ leaky_relu ]       #
       leaky_alpha: 0.1
       dropouts: 0.3                 #
@@ -199,11 +182,8 @@ training:
   low_freq_type: factor_k1h
   mid_freq_type: factor_k5m
   prefetch_factor: 1
-  lr: 0.0003
-  weight_decay: 0.0001
-  betas:
-    - 0.9
-    - 0.999
+  lr: 0.002
+  weight_decay: 0.001
   label_start: 6
   label_end: 8
   label_type: ls1_labels

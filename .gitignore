@@ -4,3 +4,4 @@ checkpoint/
 .idea
 spot_logs/
 *.log
+__pycache__/

@@ -9,7 +9,7 @@ import torch.nn as nn
 from typing import List, Optional, Tuple, Dict, Any
 # import yaml
 
-from data_alchemy.AutoFactorAndRnnModelWithFiLM import AdvancedDNNCausalCNNRNNParallelWithFiLM
+from data_alchemy.AutoFactorAndRnnModelWithFiLM import AdvancedDNNCausalCNNRNNParallelWithFiLM, LinearDNN, ResidualBlock
 from data_alchemy.utils import get_device
 
 
@@ -39,11 +39,9 @@ class MultiFreqMultiLabelClassifier(nn.Module):
         if device == 'auto':
             device = get_device()
         self.device = device
-        per_label_hidden_dims: List[int] = classification['per_label_hidden_dims']  # 每个标签的分类头
-        # 其他配置
-        label_dropout: float = classification['label_dropout']  # 标签间的dropout
+         # 每个标签的分类头
         num_labels = classification['num_labels']
-        use_batch_norm = classification['use_batch_norm']
+        label_dnn_param = classification['label_dnn_param']
 
         self.num_labels = num_labels
         # 设置随机种子
@@ -64,54 +62,29 @@ class MultiFreqMultiLabelClassifier(nn.Module):
 
         # ===== 2. 中频特征提取器（使用FiLM） =====
         print("\n2. 中频特征提取器（使用FiLM调制）")
-
+        mid_freq['context_dim'] = self.lf_extractor.final_out_dim
         self.mf_extractor = AdvancedDNNCausalCNNRNNParallelWithFiLM(
             **mid_freq,
             device=device
         )
-
-
-        prev_dim = self.lf_extractor.out_puts[-1] + self.mf_extractor.out_puts[-1]
-
-
+        prev_dim = self.lf_extractor.final_out_dim + self.mf_extractor.final_out_dim
         # ===== 4. 多标签分类头 =====
         print("\n4. 多标签分类头")
         print(f"   每个标签独立分类头")
-        print(f"   每个头隐藏层: {per_label_hidden_dims}")
         print(f"   输出: {num_labels}个独立的二分类概率")
-
         self.label_heads = nn.ModuleList()
-
         for label_idx in range(num_labels):
             # 每个标签的独立分类器
             label_layers = []
-            label_prev_dim = prev_dim
-
-            # 隐藏层
-            for i, hidden_dim in enumerate(per_label_hidden_dims):
-                linear = nn.Linear(label_prev_dim, hidden_dim)
-                if i == 0:  # 第一层
-                    nn.init.kaiming_normal_(linear.weight,
-                                            mode='fan_in',
-                                            nonlinearity='leaky_relu')
-                else:
-                    nn.init.xavier_uniform_(linear.weight, gain=0.5)
-                nn.init.zeros_(linear.bias)
-                label_layers.append(linear)
-
-                label_layers.append(nn.LeakyReLU(0.01))
-                if use_batch_norm:
-                    label_layers.append(nn.BatchNorm1d(hidden_dim))
-
-
-                # 标签间dropout（防止标签间过度依赖）
-                if label_dropout > 0:
-                    label_layers.append(nn.Dropout(label_dropout))
-
-                label_prev_dim = hidden_dim
-
+            label_dnn = LinearDNN(input_dim=prev_dim, **label_dnn_param)
+            proj = nn.Linear(prev_dim, label_dnn.output_dim)
+            # 残差投影初始化为接近0，这样初始阶段主要依赖主路径
+            nn.init.xavier_uniform_(proj.weight, gain=1)
+            nn.init.zeros_(proj.bias)
+            block = ResidualBlock(label_dnn, proj, 0.3)
+            label_layers.append(block)
             # 输出层：二分类（1个神经元）
-            output_layer = nn.Linear(label_prev_dim, 1)
+            output_layer = nn.Linear(label_dnn.output_dim, 1)
             nn.init.xavier_uniform_(output_layer.weight, gain=0.5)
             nn.init.zeros_(output_layer.bias)
             label_layers.append(output_layer)
@@ -119,11 +92,6 @@ class MultiFreqMultiLabelClassifier(nn.Module):
             label_classifier = nn.Sequential(*label_layers)
             self.label_heads.append(label_classifier)
 
-            if label_idx < 3:  # 只显示前3个标签的详细信息
-                print(f"   标签{label_idx}: {label_prev_dim} -> {per_label_hidden_dims} -> 1")
-
-        if num_labels > 3:
-            print(f"   ... 还有{num_labels - 3}个标签")
 
         # 移动到设备
         self.to(device)
@@ -190,10 +158,8 @@ class MultiFreqMultiLabelClassifier(nn.Module):
             # 通过对应的标签头
             label_pred = self.label_heads[label_idx](combined)  # (B, 1)
             all_predictions.append(label_pred)
-
         # 拼接所有标签的预测
         predictions = torch.cat(all_predictions, dim=1)  # (B, num_labels)
-
         if return_features:
             features_dict['predictions'] = predictions
             return predictions, features_dict
@@ -232,6 +198,156 @@ class MultiFreqMultiLabelClassifier(nn.Module):
             probability = self.label_heads[label_idx](x)
             prediction = (probability > threshold).float()
         return probability, prediction
+
+    def get_label_head_gradient_decay(self, logger):
+        """
+        计算每个标签头的梯度衰减率
+        衰减率 = label_dnn第一层梯度 / output_layer梯度
+
+        Returns:
+            dict: {
+                'label_0': {
+                    'output_grad': float,      # 输出层梯度
+                    'input_grad': float,       # label_dnn第一层梯度
+                    'decay_ratio': float,      # 衰减率 (input/output)
+                    'is_healthy': bool,        # 是否健康 (0.01 < decay_ratio < 100)
+                },
+                ...
+                'summary': {
+                    'mean_decay': float,
+                    'min_decay': float,
+                    'max_decay': float,
+                    'healthy_count': int,
+                    'total_labels': int
+                }
+            }
+        """
+        results = {}
+
+        for label_idx, head in enumerate(self.label_heads):
+            label_key = f'label_{label_idx}'
+            results[label_key] = {
+                'output_grad': 0.0,
+                'input_grad': 0.0,
+                'decay_ratio': 0.0,
+                'is_healthy': False,
+            }
+
+            # 找到 output_layer (最后一个Linear)
+            output_layer = None
+            for module in head.modules():
+                if isinstance(module, nn.Linear) and module.out_features == 1:
+                    output_layer = module
+                    break
+
+            if output_layer is None:
+                logger.info(f"警告: 标签 {label_idx} 未找到输出层")
+                continue
+
+            # 获取输出层梯度
+            if output_layer.weight.grad is not None:
+                output_grad = output_layer.weight.grad.norm().item()
+                results[label_key]['output_grad'] = output_grad
+            else:
+                logger.info(f"警告: 标签 {label_idx} 输出层没有梯度")
+                continue
+
+            # 找到 label_dnn 的第一层网络
+            # 首先找到 ResidualBlock
+            residual_block = None
+            for module in head.modules():
+                if isinstance(module, ResidualBlock):
+                    residual_block = module
+                    break
+
+            if residual_block is None:
+                logger.info(f"警告: 标签 {label_idx} 未找到 ResidualBlock")
+                continue
+
+            # 在 residual_block.main_path 中找到第一个 Linear 层
+            first_linear = None
+            first_linear_name = None
+            for name, module in residual_block.main_path.named_modules():
+                if isinstance(module, nn.Linear):
+                    first_linear = module
+                    first_linear_name = f"main_path.{name}.weight"
+                    break
+            first_projection = residual_block.main_path.residual_blocks[0].projection
+            if isinstance(first_projection, nn.Linear):
+                first_res_grad = first_projection.weight.norm().item()
+            else:
+                first_res_grad = None
+
+            if first_linear is None:
+                logger.info(f"警告: 标签 {label_idx} 未找到 label_dnn 的线性层")
+                continue
+
+            # 获取第一层梯度
+            if first_linear.weight.grad is not None:
+                input_grad = first_linear.weight.grad.norm().item()
+                if first_res_grad is None:
+                    first_res_grad = input_grad * residual_block.strength
+                else:
+                    first_res_grad *= residual_block.strength
+                label_res = head[0].projection.weight.norm().item() * head[0].strength
+                results[label_key]['liner_grad'] = input_grad
+                results[label_key]['input_res'] = first_res_grad
+                results[label_key]['label_res'] = label_res
+                total_input_grad = input_grad + first_res_grad + label_res
+                results[label_key]['input_grad'] = total_input_grad
+            else:
+                logger.info(f"警告: 标签 {label_idx} 第一层没有梯度")
+                continue
+
+            # 计算衰减率 (输入梯度 / 输出梯度)
+            if output_grad > 0:
+                decay_ratio = total_input_grad / output_grad
+                results[label_key]['decay_ratio'] = decay_ratio
+                # 判断是否健康 (0.01 < decay_ratio < 100)
+                results[label_key]['is_healthy'] = 0.01 < decay_ratio < 100
+
+        # 添加汇总信息
+        if results:
+            decay_ratios = [r['decay_ratio'] for r in results.values() if r['decay_ratio'] > 0]
+            if decay_ratios:
+                results['summary'] = {
+                    'mean_decay': sum(decay_ratios) / len(decay_ratios),
+                    'min_decay': min(decay_ratios),
+                    'max_decay': max(decay_ratios),
+                    'healthy_count': sum(1 for r in results.values() if r['is_healthy']),
+                    'total_labels': len(self.label_heads)
+                }
+
+        return results
+
+    def print_gradient_decay_report(self, logger):
+        """打印梯度衰减报告"""
+        results = self.get_label_head_gradient_decay(logger)
+
+        logger.info("\n" + "=" * 70)
+        logger.info("标签头梯度衰减分析报告")
+        logger.info("=" * 70)
+
+        if 'summary' not in results:
+            logger.info("无法获取梯度信息，请确保已经执行了 backward()")
+            return
+
+        # 打印每个标签的详细信息
+        logger.info("\n各标签梯度衰减详情:")
+        logger.info("-" * 70)
+        logger.info(f"{'标签':<10} {'输出梯度':<12} {'输入梯度':<12} {'dnn_grad':<12}, {'dnn_res_grad':<12} {'衰减率':<10} {'状态':<8}")
+        logger.info("-" * 70)
+
+        for label_key in sorted(results.keys()):
+            if label_key == 'summary':
+                continue
+
+            info = results[label_key]
+            status = "✓健康" if info['is_healthy'] else "⚠️问题"
+            logger.info(f"{label_key:<10} {info['output_grad']:<12.6f} "
+                  f"{info['input_grad']:<12.6f} {info['liner_grad']:<12.6f} {info['input_res']:<12.6f}"
+                        f" {info['decay_ratio']:<10.4f} {status:<8}")
+        return results
 
 
 # ==================== 训练工具类 ====================
