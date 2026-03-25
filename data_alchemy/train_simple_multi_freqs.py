@@ -14,8 +14,10 @@ from torch.utils.data import DataLoader
 
 from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLoss
 from data_alchemy.optimize_utils.find_learning_rate import find_best_lr, get_best_lr
+from data_alchemy.optimize_utils.nan_checker import check_gradient_explosion
 from data_alchemy.simple_stack_model import MultiFreqMultiLabelClassifier
 from data_loader.data_loader import *  # 你已实现
+from data_alchemy.optimize_utils import nan_checker
 
 
 def get_device():
@@ -212,10 +214,11 @@ def test_train():
     start_train(config, data_dir, market, start_time, end_time, resume_from)
 
 
-def get_data_set(data_dir, biz, lb_data_type, market, start_time, end_time, interval, seq_len, mid_type, low_type,
+def get_data_set(data_dir, biz, lb_data_type, market, start_time, end_time, interval, md_interval, seq_len, mid_type, low_type,
                  labels, hf_data_type=None):
     all_list = get_all_file_list(data_dir, biz, lb_data_type, market, start_time, end_time, interval, seq_len=seq_len)
-    return SegmentSets(all_list, data_dir, market, label_type=lb_data_type, mid_type=mid_type, low_type=low_type,
+    md_num_per_epoch = int(interval / md_interval)
+    return SegmentSets(all_list, data_dir, market, label_type=lb_data_type, md_data_interval=md_interval,  mid_type=mid_type, low_type=low_type, md_num_per_epoch=md_num_per_epoch,
                        required_labels=labels, hf_data_type=hf_data_type)
 
 
@@ -465,16 +468,16 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     for test_freq in scales:
         all_cols.append(f"long_signal_{test_freq}")
         all_cols.append(f"short_signal_{test_freq}")
-
+    md_data_interval = config['training']['md_interval']
     label_cols = all_cols[label_start:label_end]
     train_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, train_start, train_end,
-                                 interval, seq_len, mid_freq_type, low_freq_type, label_cols)
+                                 interval, md_data_interval, seq_len, mid_freq_type, low_freq_type, label_cols)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
                               prefetch_factor=prefetch)
 
     # 验证集（用于早停和调参）
     print(f"Val data: {val_start}-{train_end}, interval: {interval}")
-    val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, interval,
+    val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, interval,md_data_interval,
                                seq_len, mid_freq_type, low_freq_type,
                                label_cols)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -482,7 +485,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     # 测试集（仅最后评估一次）
     print(f"Test data: {test_start}-{test_end} seq_len: {seq_len}")
-    test_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, test_start, test_end, interval,
+    test_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, test_start, test_end, interval,md_data_interval,
                                 seq_len, mid_freq_type, low_freq_type,
                                 label_cols)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -570,7 +573,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         logger.info(f".Resume training from: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
-        if config.get('reuse_all', False):
+        if config["training"].get('reuse_all', False):
             lr = checkpoint.get('lr', lr)
             optimizer = torch.optim.AdamW(
                 optimizer_grouped_parameters,
@@ -602,7 +605,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         lrs, losses = find_best_lr(model, train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
                                    device=device)
 
-        steepest_lr, recommended_lr = get_best_lr(lrs, losses, 30, 10);
+        steepest_lr, recommended_lr = get_best_lr(lrs, losses, 3, 1);
         logger.info(f"Find best learning rate: {recommended_lr}")
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
@@ -645,13 +648,53 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         # model.update_epoch(epoch)
         gamma = 1. + min(1.0, epoch / 5)
         criterion.gamma = gamma
+        # train_dataset.epoch = epoch
         if not estimate:
             for batch in train_loader:
                 x_mid, x_low, labels = [b.to(device) for b in batch]
+                if torch.isnan(x_mid).any():
+                    err_msg = f"❌ 中频输入有 NaN! 数量: {torch.isnan(x_mid).int().sum()}"
+                    logger.error(err_msg)
+                    raise Exception(err_msg)
+
+                if torch.isnan(x_low).any():
+                    error_msg = f"❌ 低频输入有 NaN! 数量: {torch.isnan(x_low).int().sum()}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+
+                if torch.isnan(labels).any():
+                    error_msg = f"❌ 标签有 NaN! 数量: {torch.isnan(labels).int().sum()}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+
+                if torch.isinf(x_mid).any():
+                    error_msg = f"⚠️ 中频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+
+                if torch.isinf(x_low).any():
+                    error_msg = f"⚠️ 低频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+
+                if torch.isinf(labels).any():
+                    error_msg = f"⚠️ 标签有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+
                 optimizer.zero_grad()
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 loss_val = loss.item()
+                if loss_val != loss_val:
+                    if torch.isnan(logits).any():
+                        error_msg = f"⚠️ 预测结果中有 nan! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        logger.error(error_msg)
+                    else:
+                        error_msg = f"loss 值为 0"
+                    check_gradient_explosion(model)
+                    raise Exception(error_msg)
+
                 total_train_loss += loss_val
                 optimizer.zero_grad()
                 loss.backward()

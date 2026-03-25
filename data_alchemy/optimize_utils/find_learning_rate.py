@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-
+import datetime
 
 def find_best_lr(
         model,
@@ -47,9 +47,10 @@ def find_best_lr(
     losses = []
     avg_loss = 0.0
     best_loss = float('inf')
-
+    start_time = datetime.datetime.now()
     for i, batch in enumerate(train_loader):
         # 动态计算当前 lr（指数增长）
+
         lr = init_lr * (final_lr / init_lr) ** (i / num_batches)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
@@ -68,6 +69,10 @@ def find_best_lr(
 
         lrs.append(lr + 1e-12)
         losses.append(smoothed_loss)
+        end_time = datetime.datetime.now()
+        print(
+            f"[{i}/{total_batchs}] cost: {end_time - start_time}, loss = {loss_val}")
+        start_time = end_time
 
         # 提前终止：loss 爆炸
         if smoothed_loss > 30:
@@ -75,9 +80,6 @@ def find_best_lr(
             break
         if smoothed_loss < best_loss:
             best_loss = smoothed_loss
-
-        print(
-            f"[{i}/{total_batchs}]  loss = {loss_val}")
 
     # ======== 新增：生成 HTML 图表 ========
     if output_html is not None:

@@ -460,17 +460,19 @@ class LinearDNN(nn.Module):
         logger.info(f"\n【梯度衰减率 ([主， 残]衰减)]:[{grad_info['grad_decrease']['main_path']:.4f},{grad_info['grad_decrease']['residual_path']:.4f}]")
         # 分析
         logger.info("\n【分析】")
-        if grad_info['grad_decrease']['main_path'] < 1:
+        if 0 < grad_info['grad_decrease']['main_path'] < 1:
             logger.info(f"  ⚠️ 主路径梯度衰减了 {1 / grad_info['grad_decrease']['main_path']:.2f} 倍")
         else:
             logger.info("  ✓ 主路径梯度保持良好")
 
-        if grad_info['grad_decrease']['residual_path'] < 1:
+        if 0 < grad_info['grad_decrease']['residual_path'] < 1:
             logger.info(f"  ⚠️ 残差路径梯度衰减了 {1 / grad_info['grad_decrease']['residual_path']:.2f} 倍")
         else:
             logger.info("  ✓ 残差路径梯度保持良好")
         logger.info("=" * 60)
         return grad_info
+
+
 class ParallelCausalCNNBlock(nn.Module):
     """
     并行Causal CNN块：多个CNN路径并行计算

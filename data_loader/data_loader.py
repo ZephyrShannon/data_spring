@@ -180,6 +180,8 @@ class SegmentSets(Dataset):
             data_dir: str,
             market: str,
             label_type: str,
+            md_data_interval: int,
+            md_num_per_epoch: int,
             mid_type: str = "factor_k5m",
             low_type: str = "factor_k1h",
             required_labels =["ls_choice_5m","ls_choice_15m"],
@@ -197,6 +199,8 @@ class SegmentSets(Dataset):
         self.market = market
         self.required_labels = required_labels
         self.label_type = label_type
+        self.md_num_per_epoch = md_num_per_epoch
+        self.md_data_interval = md_data_interval
 
         # === 原有 segment 索引逻辑 ===
         self.all_segments = []
@@ -243,7 +247,6 @@ class SegmentSets(Dataset):
 
     def __getitem__(self, idx: int):
         # 1. 找到对应的 segment 和 local index
-        idx = idx + self.epoch
         now = None
         for start, end, seg in self.all_segments:
             if start <= idx < end:
@@ -252,19 +255,24 @@ class SegmentSets(Dataset):
                 break
         if now is None:
             raise IndexError(f"Index {idx} out of range")
-
+        offset = (self.epoch % self.md_num_per_epoch) * self.md_data_interval
         # 2. 加载高频数据
         if self.load_hf_data:
             df = self.ticks_cache.get_hf_data(now, add_factor=True)
             if df is None:
                 raise ValueError(f"No HF data for {now}")
-
+            t_now = now + datetime.timedelta(seconds=self.epoch)
             X_high = df.loc[df.index <= int(now.timestamp())].iloc[-seg.seq_len_seconds:].copy()
             X_high['t_of_day'] = (X_high.index % 86400) / 86400
             x_high_tensor = torch.FloatTensor(X_high.values)
 
         # 3. 加载中低频
-        X_mid = self._get_lf_mid_seq(now, seq_len_seconds=seg.seq_len_seconds)
+        if offset > 0:
+            md_t = now + datetime.timedelta(seconds=offset)
+        else:
+            md_t = now
+
+        X_mid = self._get_lf_mid_seq(md_t, seq_len_seconds=seg.seq_len_seconds)
         X_low = self._get_lf_low_seq(now, seq_len_seconds=seg.seq_len_seconds)
 
         # 4. 添加时间特征

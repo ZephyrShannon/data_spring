@@ -8,7 +8,7 @@ model:
   low_freq:
     name: "low_freq"
     input_dim: 14                     #
-    input_seq_len: 300                #
+    input_seq_len: 30                #
 
     init_seed: 42                     #
     deterministic_init: true          #
@@ -85,7 +85,7 @@ model:
   mid_freq:
     name: "mid_freq"
     input_dim: 17                     #
-    input_seq_len: 300                #
+    input_seq_len: 30                #
 
     init_seed: 1111                     #
     deterministic_init: false          #
@@ -191,14 +191,15 @@ class_config:
 
 training:
   seed: 1111                   
-  batch_size: 2
+  batch_size: 16
   num_epochs: 10
   grad_clip: 1.0                
   device: "auto"                
   interval: 300
+  md_interval: 60
   low_freq_type: factor_k1h
-  mid_freq_type: factor_k5m
-  prefetch_factor: 1
+  mid_freq_type: factor_k1m
+  prefetch_factor: 0
   lr: 0.0003
   weight_decay: 0.0001
   betas:
