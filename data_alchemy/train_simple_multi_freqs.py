@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from typing import Optional, List
-
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import yaml
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR, ReduceLROnPlateau
@@ -619,12 +619,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     epochs = config["training"]["num_epochs"]
         # 推荐搭配 OneCycleLR
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=recommended_lr,
-        total_steps=len(train_loader) * epochs,
-        pct_start=0.3
-    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=len(train_loader) * epochs, eta_min=1e-6)
 
     grad_clip = config["training"]["grad_clip"]
     class_config = config["class_config"]
