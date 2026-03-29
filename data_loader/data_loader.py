@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
-from data_loader.factor_tools import add_hf_factors
+#from data_loader.factor_tools import add_hf_factors
 
 
 
@@ -593,6 +593,32 @@ def get_all_file_list(
     return file_mergable
 
 
+
+def diagnose_nan_immediately(batch):
+    """
+    立即诊断 NaN 的来源
+    """
+    x_mid, x_low, labels = batch
+    has_nan = False
+    if torch.isnan(x_mid).any():
+        print(f"❌ 中频输入有 NaN! 比例: {torch.isnan(x_mid).float().mean():.2%}")
+        has_nan = True
+    if torch.isnan(x_low).any():
+        print(f"❌ 低频输入有 NaN! 比例: {torch.isnan(x_low).float().mean():.2%}")
+        has_nan = True
+    if torch.isnan(labels).any():
+        print(f"❌ 标签有 NaN! 比例: {torch.isnan(labels).float().mean():.2%}")
+        has_nan = True
+    if torch.isinf(x_mid).any():
+        print(f"⚠️ 中频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}")
+        has_nan = True
+    if torch.isinf(x_low).any():
+        print(f"⚠️ 低频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}")
+        has_nan = True
+    return has_nan
+
+
+
 def test_file_list():
     data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
     market = "BTC_USDT"
@@ -602,21 +628,20 @@ def test_file_list():
     end_time = datetime.datetime(year=2024, month=1, day=2, tzinfo=datetime.timezone.utc)
     biz = 'spot'
     data_type = "labels"
-    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, 60, 600, 60)
+    all_list = get_all_file_list(data_dir, biz, data_type, market, start_time, end_time, 60, 6, 60)
     low_type = "factor_k1h"
     mid_type = "factor_k5m"
-    ss = SegmentSets(all_list, data_dir, market, mid_type, low_type)
+    required_labels = 'long_signal_1min,short_signal_1min,long_signal_3min,short_signal_3min,long_signal_5min,short_signal_5min,long_signal_10min,short_signal_10min,long_signal_15min,short_signal_15min,long_signal_30min,short_signal_30min'.split(",")
+    ss = SegmentSets(all_list, data_dir, market, "ls1_labels",3600, 5, mid_type, low_type, required_labels, hf_data_type=None)
     ss_len = ss.__len__()
-    a = ss[0]
-    a = ss[49]
-    a = ss[50]
-    a = ss[51]
-    a = ss[109]
-    a = ss[110]
-    a = ss[111]
-    a = ss[169]
-    a = ss[170]
-    a = ss[1400]
-    a = ss[0]
+    for i in range(ss_len):
+        if diagnose_nan_immediately(ss[i]):
+            nan_dt = ss.get_item_datetime(idx=i)
+            print(f"Found nan at {nan_dt}")
+            break
+        if i % 240:
+            print(f"process:{i}/{ss_len}")
 
-#test_file_list()
+if __name__ == "__main__":
+    #test_file_list()
+    pass

@@ -477,7 +477,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
     # 验证集（用于早停和调参）
     print(f"Val data: {val_start}-{train_end}, interval: {interval}")
-    val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, interval,md_data_interval,
+    val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, 300,md_data_interval,
                                seq_len, mid_freq_type, low_freq_type,
                                label_cols)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -570,7 +570,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         resume_from = os.path.join(save_dir, "best_model.pth")
 
     if resume_from and os.path.exists(resume_from):
-        logger.info(f".Resume training from: {resume_from}")
+        logger.info(f"Resume training from: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         if config["training"].get('reuse_all', False):
@@ -588,7 +588,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             optimizer = None
 
         best_val_loss = checkpoint.get("val_loss", float("inf"))
-        logger.info(f".Resumed from epoch {start_epoch}, best val loss: {best_val_loss:.6f}")
+        logger.info(f"Resumed from epoch {start_epoch}, best val loss: {best_val_loss:.6f}")
         model_loaded = True
         if estimate:
             start_epoch = 0
@@ -635,8 +635,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     procedure_tracker.record("Start_Epoch", logger)
     logger.info(f"Start training, {start_epoch}/{epochs}")
 
-
-
     for epoch in range(start_epoch, epochs):
         epoch_tracker = MemTracker("epoch_tracker", procedure_tracker.snapshot)
         # --- Train ---
@@ -649,38 +647,42 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         gamma = 1. + min(1.0, epoch / 5)
         criterion.gamma = gamma
         # train_dataset.epoch = epoch
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"start epoch:{epoch}, lr={current_lr}")
+        test_nan = config.get("test_nan", False)
         if not estimate:
             for batch in train_loader:
                 x_mid, x_low, labels = [b.to(device) for b in batch]
-                if torch.isnan(x_mid).any():
-                    err_msg = f"❌ 中频输入有 NaN! 数量: {torch.isnan(x_mid).int().sum()}"
-                    logger.error(err_msg)
-                    raise Exception(err_msg)
+                if test_nan:
+                    if torch.isnan(x_mid).any():
+                        err_msg = f"❌ 中频输入有 NaN! 数量: {torch.isnan(x_mid).int().sum()}"
+                        logger.error(err_msg)
+                        raise Exception(err_msg)
 
-                if torch.isnan(x_low).any():
-                    error_msg = f"❌ 低频输入有 NaN! 数量: {torch.isnan(x_low).int().sum()}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    if torch.isnan(x_low).any():
+                        error_msg = f"❌ 低频输入有 NaN! 数量: {torch.isnan(x_low).int().sum()}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
 
-                if torch.isnan(labels).any():
-                    error_msg = f"❌ 标签有 NaN! 数量: {torch.isnan(labels).int().sum()}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    if torch.isnan(labels).any():
+                        error_msg = f"❌ 标签有 NaN! 数量: {torch.isnan(labels).int().sum()}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
 
-                if torch.isinf(x_mid).any():
-                    error_msg = f"⚠️ 中频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    if torch.isinf(x_mid).any():
+                        error_msg = f"⚠️ 中频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
 
-                if torch.isinf(x_low).any():
-                    error_msg = f"⚠️ 低频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    if torch.isinf(x_low).any():
+                        error_msg = f"⚠️ 低频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
 
-                if torch.isinf(labels).any():
-                    error_msg = f"⚠️ 标签有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    if torch.isinf(labels).any():
+                        error_msg = f"⚠️ 标签有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
 
                 optimizer.zero_grad()
                 logits = model(x_low, x_mid)
