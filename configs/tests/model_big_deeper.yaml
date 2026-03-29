@@ -192,15 +192,15 @@ class_config:
 training:
   seed: 1111                   
   batch_size: 32
-  num_epochs: 10
-  grad_clip: 1.0                
+  num_epochs: 60
+  grad_clip: 2.0
   device: "auto"                
-  interval: 300
+  interval: 1800
   md_interval: 60
   low_freq_type: factor_k1h
   mid_freq_type: factor_k1m
   prefetch_factor: 0
-  lr: 0.0003
+  lr: 0.0001
   weight_decay: 0.0001
   betas:
     - 0.9
@@ -213,5 +213,5 @@ training:
 # ==========================================
 # ==========================================
 callbacks:
-  save_dir: "checkpoints/exp_m4_big_and_deep3"  
-  patience: 3                 
+  save_dir: "checkpoints/exp_m4_big_deeper1"
+  patience: 10

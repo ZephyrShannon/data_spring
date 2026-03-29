@@ -573,7 +573,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         logger.info(f"Resume training from: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
-        if config["training"].get('reuse_all', False):
+        reuse_all = config["training"].get('reuse_all', None)
+        if reuse_all is not None:
             lr = checkpoint.get('lr', lr)
             optimizer = torch.optim.AdamW(
                 optimizer_grouped_parameters,
