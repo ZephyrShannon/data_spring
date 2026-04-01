@@ -175,27 +175,14 @@ model:
     threshold: 0.5
     average_methods: ["micro", "macro", "weighted"]
 
-class_config:
-  ls_choice:
-    1m: 2
-    3m: 2
-    5m: 2
-    15m: 2
-    30m: 2
-  volat:
-    1m: 2
-    3m: 2
-    5m: 2
-    15m: 2
-    30m: 2
 
 training:
   seed: 1111                   
   batch_size: 16
-  num_epochs: 10
+  num_epochs: 3
   grad_clip: 1.0                
   device: "auto"                
-  interval: 300
+  interval: 1800
   md_interval: 60
   low_freq_type: factor_k1h
   mid_freq_type: factor_k1m

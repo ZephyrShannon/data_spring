@@ -16,6 +16,7 @@ from data_alchemy.loss import create_fixed_class_weights, MultiHeadBinaryFocalLo
 from data_alchemy.optimize_utils.find_learning_rate import find_best_lr, get_best_lr
 from data_alchemy.optimize_utils.nan_checker import check_gradient_explosion
 from data_alchemy.simple_stack_model import MultiFreqMultiLabelClassifier
+from data_alchemy.test_metrics import ValidationMetrics
 from data_loader.data_loader import *  # 你已实现
 from data_alchemy.optimize_utils import nan_checker
 
@@ -480,7 +481,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     val_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, val_start, val_end, 300,md_data_interval,
                                seq_len, mid_freq_type, low_freq_type,
                                label_cols)  # TimeSeriesDataset(data_dir, market, val_start, val_end)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+    val_loader = DataLoader(val_dataset, batch_size=batch_size*2, shuffle=False, num_workers=num_workers,
                             prefetch_factor=prefetch)
 
     # 测试集（仅最后评估一次）
@@ -488,7 +489,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_dataset = get_data_set(data_dir, "spot", "ls1_labels", market, test_start, test_end, interval,md_data_interval,
                                 seq_len, mid_freq_type, low_freq_type,
                                 label_cols)  # TimeSeriesDataset(data_dir, market, test_start, test_end)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+    test_loader = DataLoader(test_dataset, batch_size=batch_size * 2, shuffle=False, num_workers=num_workers,
                              prefetch_factor=prefetch)
 
     logging.basicConfig(
@@ -623,7 +624,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     scheduler = CosineAnnealingLR(optimizer, T_max=len(train_loader) * epochs, eta_min=1e-6)
 
     grad_clip = config["training"]["grad_clip"]
-    class_config = config["class_config"]
+    #class_config = config["class_config"]
     class_weights = create_fixed_class_weights()
     class_weights = {k: v.to(device) for k, v in class_weights.items()}
 
@@ -731,11 +732,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         # collected_pred_details = defaultdict(list)
 
         with torch.no_grad():
-            all_val_details = {}
             all_probs_list = []
-            all_logits_list = []  # 用于收集所有样本的 logits
-            all_labels_list = []
-
+            metrics_calculator = ValidationMetrics(label_num, device)
             for batch in val_loader:
                 x_mid, x_low, labels = [b.to(device) for b in batch]
                 logits = model(x_low, x_mid)
@@ -748,39 +746,17 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                     scale_detail = details[i]
                     for name, detail in zip(scale_names, scale_detail):
                         all_val_details[name] = all_val_details.get(name, 0) + detail
-                if estimate:
-                    all_logits_list.append(logits.cpu().numpy())
-                    all_probs_list.append(torch.sigmoid(logits).cpu().numpy())  # 转概率
-                    all_labels_list.append(labels.cpu().numpy())
-                else:
-                    all_probs_list.append(torch.sigmoid(logits).cpu().numpy())  # 转概率
+                all_probs_list.append(torch.sigmoid(logits).cpu().numpy())  # 转概率
 
+                metrics_calculator.update(logits, labels)
                     # 转换为 CPU numpy 数组
                 if break_on_debug:
                     logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
                     break
 
-            if estimate:
-                # 合并所有 batch 的数据
-                all_logits = np.vstack(all_logits_list)  # (N, S)
-                all_probs = np.vstack(all_probs_list)  # (N, S)
-                all_labels = np.vstack(all_labels_list)  # (N, S)
-
-                data_dict = {}
-                for i, scale in enumerate(selected_labels):
-                    data_dict[f"{scale}_prob"] = all_probs[:, i]
-                    data_dict[f"{scale}_logit"] = all_logits[:, i]
-                    data_dict[f"{scale}_label"] = all_labels[:, i]
-
-                # 创建 DataFrame
-                df = pd.DataFrame(data_dict)
-                # 保存
-                os.makedirs(save_dir, exist_ok=True)
-                df.to_csv(os.path.join(save_dir, "val_predictions.csv"), index=False)
-                logger.info(f"Saved {len(df)} validation samples to {save_dir}/val_predictions.csv")
-            else:
-                all_probs = np.vstack(all_probs_list)  # (N, S)
-                logger.info(f"Probs - min: {all_probs.min():.4f}, max: {all_probs.max():.4f}, "
+            metrics_calculator.print_metrics(label_cols, logger)
+            all_probs = np.vstack(all_probs_list)  # (N, S)
+            logger.info(f"Probs - min: {all_probs.min():.4f}, max: {all_probs.max():.4f}, "
                       f"mean: {all_probs.mean():.4f}, std: {all_probs.std():.4f}")
             less_02 = all_probs < 0.25
             num_less_02 = less_02.sum()
@@ -797,7 +773,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             mid = ((all_probs >= 0.4) & (all_probs <= 0.6))
             num_mid = mid.sum()
             mean_mid = all_probs[mid].mean()
-            total_prob = all_probs.shape[0]
 
             logger.info(f"Probability distribution: [0-0.2]: [{mean_less_02},{num_less_02}], "
                         f"[0.2-0.8]: [{mean_mid},{num_mid}] "
@@ -805,7 +780,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
         avg_val_loss = total_val_loss / len(val_loader)
         # 在每个验证步骤后调用
-        scheduler.step(avg_val_loss)
+        scheduler.step(epoch)
 
         total_norm = 0
         for p in model.parameters():
@@ -888,30 +863,21 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     all_test_accuracies = {}
 
     with torch.no_grad():
+        metrics_calculator = ValidationMetrics(label_num,  device)
         for batch in test_loader:
             x_mid, x_low, labels = [b.to(device) for b in batch]
             logits = model(x_low, x_mid)
             loss = criterion(logits, labels)
             total_test_loss += loss.item()
-            details = criterion.compute_metrics_per_head(logits, labels)
-
-            # 累积 loss
-            for i in range(len(log_indies)):
-                scale_names = log_indies[i]
-                scale_detail = details[i]
-                for name, detail in zip(scale_names, scale_detail):
-                    all_val_details[name] = all_val_details.get(name, 0) + detail
+            metrics_calculator.update(logits, labels)
 
             if break_on_debug:
                 logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
                 break
     # 平均
     avg_test_loss = total_test_loss / len(test_loader)
-    for k in all_test_details:
-        all_test_details[k] /= len(test_loader)
-    for k in all_test_accuracies:
-        all_test_accuracies[k] /= len(test_loader)
 
+    metrics_calculator.print_metrics(label_cols, logger)
     # 构建最终结果
     test_metrics = {
         "test_loss": round(avg_test_loss, 6),

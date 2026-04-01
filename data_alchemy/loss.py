@@ -233,35 +233,51 @@ class MultiHeadBinaryFocalLoss(nn.Module):
 
         return focal_loss.sum()
 
+    @staticmethod
+    def compute_metrics_vectorized(logits, targets):
+        probs = torch.sigmoid(logits)
+        preds = (probs >= 0.5).float()
+
+        tp = (preds * targets).sum(dim=0)
+        fp = (preds * (1 - targets)).sum(dim=0)
+        fn = ((1 - preds) * targets).sum(dim=0)
+
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+
+        return precision, recall, f1
 
     @staticmethod
     def compute_metrics_per_head(
-            preds: torch.Tensor,
+            logits: torch.Tensor,
             targets: torch.Tensor
     ) -> List[Tuple[float, float, float]]:
         """
         Compute Precision, Recall, F1 for each binary classification head.
 
         Args:
-            preds: (B, H) —— predicted 0/1 labels
+            logits: (B, H) —— returns of the model
             targets: (B, H) —— true 0/1 labels
 
         Returns:
             List of (precision, recall, f1) for each head (length = H)
         """
-        B, H = preds.shape
+        B, H = logits.shape
         assert targets.shape == (B, H)
 
         metrics = []
-        probabilities = torch.sigmoid(preds)
+        probabilities = torch.sigmoid(logits)
         # 转换为二进制预测
         preds = (probabilities >= 0.5)
         targets = targets.bool()
 
         for h in range(H):
-            tp = (preds[:, h] & targets[:, h]).sum().item()
-            fp = (preds[:, h] & ~targets[:, h]).sum().item()
-            fn = (~preds[:, h] & targets[:, h]).sum().item()
+            pred_h = preds[:, h]
+            target_h = targets[:, h]
+            tp = ((pred_h == 1) & (target_h == 1)).sum().item()
+            fp = ((pred_h == 1) & (target_h == 0)).sum().item()
+            fn = ((pred_h == 0) & (target_h == 1)).sum().item()
             #print(f"tp={tp}, fp={fp}, fn={fn}")
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
