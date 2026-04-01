@@ -187,32 +187,51 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         reduction: 'mean' or 'sum' over all heads and samples
     """
 
-    def __init__(self, alphas: Optional[List[float]]):
+    def __init__(
+            self,
+            alphas: Optional[List[float]] = None,
+            gamma: float = 2.0,
+    ):
         super().__init__()
-        self.alphas = alphas
+        self.gamma = gamma
 
         if alphas is not None:
-            self.alphas = torch.tensor(alphas, dtype=torch.float32)  # (H,)
-            self.alphas = self.alphas/(1-self.alphas)
+            # 正样本10%时，alpha应该在 0.75-0.85 之间
+            # 不要做除以 (1-alpha) 的转换！
+            self.register_buffer('pos_weights', torch.tensor(alphas, dtype=torch.float32))
+            self.register_buffer('neg_weights', 1.0 - self.pos_weights)
         else:
-            raise Exception("alphas is None!") # will be handled in forward
+            # 默认配置
+            self.pos_weights = torch.tensor([0.8, 0.8])
+            self.neg_weights = torch.tensor([0.2, 0.2])
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        base_loss = F.binary_cross_entropy_with_logits(
-            logits, targets,
-            reduction='none'  # 保持每个元素的损失
+        # 1. BCE loss
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, reduction='none'
         )
 
-        # 2. 创建放大因子
-        # 正样本：alpha倍
-        # 负样本：1倍
-        multiplier = torch.where(
+        # 2. 计算 pt
+        probs = torch.sigmoid(logits)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+
+        # 3. Focal weight
+        focal_weight = (1 - pt) ** self.gamma
+
+        # 4. Alpha weight
+        alpha_weight = torch.where(
             targets == 1,
-            self.alphas.clone().detach().to(logits.device),
-            torch.tensor(1., device=logits.device)
+            self.pos_weights.view(1, -1).to(logits.device),
+            self.neg_weights.view(1, -1).to(logits.device)
         )
-        amplified_loss = base_loss * multiplier
-        return amplified_loss.mean()
+
+        # 5. 组合权重
+        total_weight = focal_weight * alpha_weight
+
+        # 6. Focal loss
+        focal_loss = total_weight * bce_loss
+
+        return focal_loss.sum()
 
 
     @staticmethod
@@ -243,7 +262,7 @@ class MultiHeadBinaryFocalLoss(nn.Module):
             tp = (preds[:, h] & targets[:, h]).sum().item()
             fp = (preds[:, h] & ~targets[:, h]).sum().item()
             fn = (~preds[:, h] & targets[:, h]).sum().item()
-            print(f"tp={tp}, fp={fp}, fn={fn}")
+            #print(f"tp={tp}, fp={fp}, fn={fn}")
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0

@@ -572,10 +572,10 @@ def get_all_file_list(
     file_mergable = []
     time_list = []
     one_hour = datetime.timedelta(hours=1)
-
+    omit = datetime.datetime.strptime(f"2023-08-13 13:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
     while start_time < end_time:
         file_path = build_filepath(base=data_dir, biz=biz, data_type=data_type, market=market, dt=start_time)
-        if os.path.exists(file_path):
+        if os.path.exists(file_path) and omit != start_time:
             time_list.append(start_time)
         else:
             if time_list:

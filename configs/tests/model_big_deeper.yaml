@@ -199,7 +199,7 @@ training:
   md_interval: 60
   low_freq_type: factor_k1h
   mid_freq_type: factor_k1m
-  prefetch_factor: 0
+  prefetch_factor: 1
   lr: 0.0001
   weight_decay: 0.0001
   betas:

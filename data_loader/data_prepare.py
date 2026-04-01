@@ -8,7 +8,7 @@ import gzip
 from data_downloader.file_checker import build_filepath
 import calendar
 from data_downloader.data_tools import load_kline_month, get_next_month
-from data_loader.factor_tools import add_low_freq_factors, add_mid_freq_factors, add_hf_factors
+from factor_tools import add_low_freq_factors, add_mid_freq_factors, add_hf_factors
 from pathlib import Path
 
 
@@ -193,7 +193,7 @@ def fill_missing_1min_klines(df):
     df_full['volume'] = df_full['volume'].fillna(0)
 
     # 6. 重新生成 timestamp 列（秒级 int）
-    df_full['timestamp'] = df_full.index.astype('int64') // 10 ** 9
+    df_full['timestamp'] = df_full.index.astype('int64') #// 10 ** 9
 
     # 7. 恢复原始列顺序（可选）
     df_full = df_full[['timestamp', 'volume', 'close', 'high', 'low', 'open']].reset_index(drop=True)
@@ -818,8 +818,12 @@ def classify_all_volatile_labels():
 
 
 def create_kline_data():
-    start_time = datetime.datetime(year=2022, month=8, day=1, tzinfo=datetime.timezone.utc)
-    end_time = datetime.datetime(year=2025, month=11, day=1, tzinfo=datetime.timezone.utc)
+    # (2023, 8, 13, 13, 11) miss 15 minn
+    # 2023-08-14 07 nan
+    # 2025-06-29 05 nan
+    data_start = datetime.datetime(year=2025, month=6, day=1, tzinfo=datetime.timezone.utc)
+    start_time = data_start
+    end_time = datetime.datetime(year=2025, month=7, day=1, tzinfo=datetime.timezone.utc)
     market = "BTC_USDT"
     data_type = "candlesticks_1h"
     data_dir = "/Users/zephyr/codes/alpha_spring/data_spring/data"
@@ -830,7 +834,7 @@ def create_kline_data():
     k1m = MonthlyDataCache(data_dir, market, data_type)
     from pathlib import Path
     price_factor = (1/50000)
-    while start_time < end_time:
+    while start_time < start_time:
         next_date = get_next_month(start_time)
         data_1h = k1h.get_klines(start_time)
         factor_1h = add_low_freq_factors(data_1h, price_factor)
@@ -847,7 +851,7 @@ def create_kline_data():
         factor_1h_monthly.to_csv(k1h_filepath, index=False, float_format='%.6f')
         start_time = next_date
 
-    start_time = datetime.datetime(year=2023, month=3, day=1, tzinfo=datetime.timezone.utc)
+    start_time = data_start
     while start_time < end_time:
         next_date = get_next_month(start_time)
         data_5m_low = k5m.get_klines(start_time).copy()
@@ -896,6 +900,8 @@ def create_kline_data():
             k1m_dir.mkdir(parents=True, exist_ok=False)
         factor_1m_monthly.reset_index().to_csv(k1m_filepath, index=False, float_format='%.6f')
         start_time = next_date
+
+create_kline_data()
 
 def find_missing_date(df: pd.DataFrame):
     dt_series = pd.to_datetime(df.index, unit='s')

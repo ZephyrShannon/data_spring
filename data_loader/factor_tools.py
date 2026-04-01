@@ -1,5 +1,8 @@
 import pandas as pd
 import numpy as np
+import yaml
+
+from data_loader import get_all_file_list, SegmentSets
 
 
 def calculate_sma(df: pd.DataFrame, price_col: str, window: int) -> pd.Series:
@@ -126,7 +129,7 @@ def calculate_rsi(df: pd.DataFrame, price_col: str = 'close', window: int = 14) 
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return rsi.fillna(0)
 
 
 def calculate_williams_r(df: pd.DataFrame, high_col: str, low_col: str, close_col: str, window: int = 14) -> pd.Series:
@@ -446,8 +449,73 @@ def add_hf_factors(df: pd.DataFrame, price_factor = 1/50000) -> pd.DataFrame:
     return df
 
 
+def load_config(path: str) -> dict:
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
+
+def get_data_set(data_dir, biz, lb_data_type, market, start_time, end_time, interval, md_interval, seq_len, mid_type, low_type,
+                 labels, hf_data_type=None) -> SegmentSets:
+    all_list = get_all_file_list(data_dir, biz, lb_data_type, market, start_time, end_time, interval, seq_len=seq_len)
+    md_num_per_epoch = int(interval / md_interval)
+    return SegmentSets(all_list, data_dir, market, label_type=lb_data_type, md_data_interval=md_interval,  mid_type=mid_type, low_type=low_type, md_num_per_epoch=md_num_per_epoch,
+                       required_labels=labels, hf_data_type=hf_data_type)
+
+def test_nan():
+    import datetime
+    train_start = datetime.datetime.strptime(f"2025-06-01 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
+    train_end = datetime.datetime.strptime(f"2025-10-01 00:00:00+0000", '%Y-%m-%d %H:%M:%S%z')
+    interval = 3600
+    md_data_interval = 60
+    seq_len= 60
+    mid_freq_type = 'factor_k1h'
+    low_freq_type = 'factor_k1m'
+    all_cols = []
+    scales = ['1min', '3min', "5min", "15min", "30min"]
+    for test_freq in scales:
+        all_cols.append(f"long_signal_{test_freq}")
+        all_cols.append(f"short_signal_{test_freq}")
+    md_data_interval = 60
+    label_cols = all_cols
+    train_dataset = get_data_set("data", "spot", "ls1_labels", "BTC_USDT", train_start, train_end,
+                                 interval, md_data_interval, seq_len, mid_freq_type, low_freq_type, label_cols)
+    len = train_dataset.__len__()
+    import torch
+    for i in range(len):
+        if i % 100 == 0:
+            print(f"{i}/{len}")
+        data = train_dataset[i]
+        x_mid, x_low, labels = data
+        dt = train_dataset.get_item_datetime(i)
+        if test_nan:
+            if torch.isnan(x_mid).any():
+                err_msg = f"❌ 中频输入有 NaN! 数量: {torch.isnan(x_mid).int().sum()} @ [{i}]={dt}"
+                print(err_msg)
+
+            if torch.isnan(x_low).any():
+                error_msg = f"❌ 低频输入有 NaN! 数量:{torch.isnan(x_low).int().sum()} @ [{i}]={dt}"
+                print(error_msg)
+
+            if torch.isnan(labels).any():
+                error_msg = f"❌ 标签有 NaN! 数量: {torch.isnan(labels).int().sum()} @ [{i}]={dt}"
+                print(error_msg)
+
+            if torch.isinf(x_mid).any():
+                error_msg = f"⚠️ 中频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%} @  [{i}]={dt}"
+                print(error_msg)
+
+            if torch.isinf(x_low).any():
+                error_msg = f"⚠️ 低频输入有 Inf! 比例:  {torch.isinf(x_mid).float().mean():.2%} @  [{i}]={dt}"
+                print(error_msg)
+
+            if torch.isinf(labels).any():
+                error_msg = f"⚠️ 标签有 Inf! 比例:  {torch.isinf(x_mid).float().mean():.2%} @  [{i}]={dt}"
+                print(error_msg)
+
 # --- 示例用法 ---
 if __name__ == "__main__":
+    test_nan()
+
+
     # 创建示例数据
     np.random.seed(42)
     dates = pd.date_range('2023-01-01', periods=100, freq='D')
@@ -477,7 +545,7 @@ if __name__ == "__main__":
     stoch_df = calculate_stochastic(df, 'high', 'low', 'close')
     df = pd.concat([df, stoch_df], axis=1)
 
-    df['OBV'] = calculate_obv(df, 'close', 'volume')
+    df['OBV'] = calculate_rolling_obv(df, 'close', 'volume')
     df['ATR'] = calculate_atr(df, 'high', 'low', 'close')
     df['ROC'] = calculate_roc(df, 'close', 10)
 
