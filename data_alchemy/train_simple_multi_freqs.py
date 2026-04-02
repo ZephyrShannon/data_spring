@@ -450,7 +450,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     test_end = end_time
     interval = train_cfg.get('interval', 60)
     seq_len = model_cfg['low_freq']['input_seq_len']
-    criterion = MultiHeadBinaryFocalLoss(alphas=alphas)
+
 
     prefetch = train_cfg.get('prefetch_factor', 1)
     if prefetch == 0 or estimate:
@@ -570,6 +570,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     if resume_from is None:
         resume_from = os.path.join(save_dir, "best_model.pth")
 
+    criterion = MultiHeadBinaryFocalLoss(num_heads=label_num, device=device, alphas=alphas, gamma=2.0)
+
     if resume_from and os.path.exists(resume_from):
         logger.info(f"Resume training from: {resume_from}")
         checkpoint = torch.load(resume_from, map_location=device, weights_only=False)
@@ -601,7 +603,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         optimizer = None
 
     if optimizer is None:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7, weight_decay=1e-4)
+        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=1e-7, weight_decay=1e-4)
 
         # 执行 LR 测试（只跑 1 个 epoch）
         lrs, losses = find_best_lr(model, train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
@@ -788,17 +790,18 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 param_norm = p.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
         total_norm = total_norm ** 0.5
-        print(f"Gradient norm: {total_norm:.6f}")
+        logger.info(f"Gradient norm: {total_norm:.6f}")
 
         # 2. 梯度消失时：检查激活函数、初始化、添加残差连接
         if total_norm < 1e-4:
             # 检查是否有梯度消失
-            print("Warning: Gradients are vanishing!")
+            logger.warn(f"Warning: Gradients are vanishing: {total_norm}")
             # 考虑：使用LeakyReLU替代ReLU，检查初始化，添加skip connection
 
         # 3. 梯度爆炸时：加强梯度裁剪
         if total_norm > 100:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            logger.warn(f"Warning: Gradient are exploding: {total_norm}")
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=30.0)
 
         log_dict = {
             "epoch": epoch + 1,
@@ -840,11 +843,13 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             if patience_counter >= config["callbacks"]["patience"]:
                 logger.info("Early stopping triggered.")
                 break
-
+        stop_file = os.path.join(save_dir, "epoch.stop")
         # --- Check for manual stop signal ---
-        if os.path.exists(os.path.join(save_dir, "epoch.stop")) or break_on_debug:
+        if os.path.exists(stop_file):
             logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
-            os.remove(os.path.join(save_dir, "epoch.stop"))  # 可选：自动清理
+            os.remove(stop_file)  # 可选：自动清理
+            break
+        elif break_on_debug:
             break
         else:
             procedure_tracker.record(f"Validation[{epoch} ends", logger)

@@ -175,63 +175,104 @@ from typing import List, Optional, Tuple
 
 class MultiHeadBinaryFocalLoss(nn.Module):
     """
-    Multi-head binary focal loss.
+    多头 Focal Loss - 支持多标签/多任务分类
 
-    Each head is an independent binary classification task.
-
-    Args:
-        alphas: List[float] of length num_heads.
-                alpha for each head (weight for positive class).
-                If None, use 0.8 for all heads.
-        gamma: Focusing parameter (default=2.0)
-        reduction: 'mean' or 'sum' over all heads and samples
+    特点:
+    - 支持多个独立的二分类任务
+    - 每个任务可以有独立的 alpha 和 gamma
+    - 支持样本级和任务级的权重
+    - 数值稳定，防止梯度爆炸
     """
 
     def __init__(
             self,
-            alphas: Optional[List[float]] = None,
+            num_heads: int,
+            device,
+            alphas,
             gamma: float = 2.0,
     ):
+        """
+        Args:
+            num_heads: 任务数量（头数）
+            alphas: 每个头的 alpha 参数
+                    - None: 使用默认值 0.75
+                    - float: 所有头使用相同的 alpha
+                    - List[float]: 每个头独立的 alpha
+            gamma: 聚焦参数，默认 2.0
+            device: 设备
+        """
         super().__init__()
+
+        self.num_heads = num_heads
         self.gamma = gamma
 
-        if alphas is not None:
-            # 正样本10%时，alpha应该在 0.75-0.85 之间
-            # 不要做除以 (1-alpha) 的转换！
-            self.register_buffer('pos_weights', torch.tensor(alphas, dtype=torch.float32))
-            self.register_buffer('neg_weights', 1.0 - self.pos_weights)
-        else:
-            # 默认配置
-            self.pos_weights = torch.tensor([0.8, 0.8])
-            self.neg_weights = torch.tensor([0.2, 0.2])
+        # 处理 alphas
+        if alphas is None:
+            # 默认所有头使用 0.75
+            alphas = [0.8] * num_heads
+        elif isinstance(alphas, (int, float)):
+            alphas = [float(alphas)] * num_heads
+        elif len(alphas) != num_heads:
+            raise ValueError(f"alphas length {len(alphas)} != num_heads {num_heads}")
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        # 1. BCE loss
+        # 注册为 buffer（可选的，这里用普通属性也可以）
+        self.alphas = torch.tensor(alphas, dtype=torch.float32, device=device)
+
+        # 预计算正负样本权重
+        self.pos_weights = self.alphas
+        self.neg_weights = 1.0 - self.alphas
+
+
+    def forward(
+            self,
+            logits: torch.Tensor,
+            targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        计算多头 Focal Loss
+
+        Args:
+            logits: (batch_size, num_heads) - 模型输出的 logits
+            targets: (batch_size, num_heads) - 真实标签 (0 或 1)
+
+        Returns:
+            loss: 标量损失值
+            components: (可选) 各个组件的字典
+        """
+        # 1. 输入验证
+        assert logits.shape == targets.shape, \
+            f"Shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+        assert logits.size(1) == self.num_heads, \
+            f"Expected {self.num_heads} heads, got {logits.size(1)}"
+
+        # 2. 数值稳定处理
+        logits = torch.clamp(logits, -10, 10)
+
+        # 4. 计算 BCE loss
         bce_loss = F.binary_cross_entropy_with_logits(
             logits, targets, reduction='none'
-        )
+        )  # (batch_size, num_heads)
 
-        # 2. 计算 pt
+        # 5. 计算 pt（模型对正确类的预测概率）
         probs = torch.sigmoid(logits)
         pt = torch.where(targets == 1, probs, 1 - probs)
+        pt = torch.clamp(pt, 1e-7, 1 - 1e-7)  # 防止极端值
+        # 6. 计算 Focal weight
+        focal_weight = (1 - pt) ** self.gamma  # (batch_size, num_heads)
 
-        # 3. Focal weight
-        focal_weight = (1 - pt) ** self.gamma
-
-        # 4. Alpha weight
+        # 7. 计算 Alpha weight
         alpha_weight = torch.where(
             targets == 1,
-            self.pos_weights.view(1, -1).to(logits.device),
-            self.neg_weights.view(1, -1).to(logits.device)
-        )
+            self.pos_weights.view(1, -1),
+            self.neg_weights.view(1, -1)
+        )  # (batch_size, num_heads)
 
-        # 5. 组合权重
-        total_weight = focal_weight * alpha_weight
+        # 8. 组合权重
+        total_weight = focal_weight * alpha_weight  # (batch_size, num_heads)
+        # 10. 计算加权 loss
+        weighted_loss = total_weight * bce_loss  # (batch_size, num_heads)
 
-        # 6. Focal loss
-        focal_loss = total_weight * bce_loss
-
-        return focal_loss.sum()
+        return weighted_loss.mean()
 
     @staticmethod
     def compute_metrics_vectorized(logits, targets):
