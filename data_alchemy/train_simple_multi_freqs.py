@@ -1,5 +1,6 @@
 # train.py
 import csv
+import datetime
 import gc
 import json
 import logging
@@ -397,6 +398,16 @@ def check_model_gradients_by_component(model, logger):
             logger.info(f"{comp_name:10s} | {avg_grad:.6f} | {min_grad:.6f} | {max_grad:.6f} | {len(grads):3d}")
     return components
 
+def save_model_and_date(model, optimizer, recommended_lr, output_dir, index:int, start_date: datetime.datetime, end_date: datetime.datetime):
+    save_file = f"{output_dir}/{index:04}_{start_date.year}{start_date.month:02}{start_date.day:02}{start_date.hour:02}{start_date.minute:02}_{end_date.year:02}{end_date.month:02}{end_date.day:02}{end_date.hour:02}{end_date.minute}.pth"
+    torch.save({
+        'epoch': 0,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'lr': recommended_lr,
+    }, save_file)
+
+
 def start_train(config, data_dir, market, start_time, end_time, resume_from: Optional[str] = None, estimate=False):
     train_cfg = config["training"]
     model_cfg = config['model']
@@ -564,7 +575,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     best_val_loss = float("inf")
     patience_counter = 0
 
-
     total_batchs = (len(train_dataset) + batch_size - 1) // batch_size
 
     if resume_from is None:
@@ -652,34 +662,38 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         if not estimate:
             for batch in train_loader:
                 x_mid, x_low, labels = [b.to(device) for b in batch]
+                idx = cur_batch * batch_size
+                end_idx = idx + batch_size - 1
+                cur_date = train_dataset.get_item_datetime(idx)
+                end_date = train_dataset.get_item_datetime(end_idx)
                 if test_nan:
                     if torch.isnan(x_mid).any():
-                        err_msg = f"❌ 中频输入有 NaN! 数量: {torch.isnan(x_mid).int().sum()}"
+                        err_msg = f"❌ 中频[{cur_date}-{end_date}]输入有 NaN! 数量: {torch.isnan(x_mid).int().sum()}"
                         logger.error(err_msg)
                         raise Exception(err_msg)
 
                     if torch.isnan(x_low).any():
-                        error_msg = f"❌ 低频输入有 NaN! 数量: {torch.isnan(x_low).int().sum()}"
+                        error_msg = f"❌ 低频[{cur_date}-{end_date}]输入有 NaN! 数量: {torch.isnan(x_low).int().sum()}"
                         logger.error(error_msg)
                         raise Exception(error_msg)
 
                     if torch.isnan(labels).any():
-                        error_msg = f"❌ 标签有 NaN! 数量: {torch.isnan(labels).int().sum()}"
+                        error_msg = f"❌ 标签[{cur_date}-{end_date}]有 NaN! 数量: {torch.isnan(labels).int().sum()}"
                         logger.error(error_msg)
                         raise Exception(error_msg)
 
                     if torch.isinf(x_mid).any():
-                        error_msg = f"⚠️ 中频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        error_msg = f"⚠️ 中频[{cur_date}-{end_date}]输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
                         logger.error(error_msg)
                         raise Exception(error_msg)
 
                     if torch.isinf(x_low).any():
-                        error_msg = f"⚠️ 低频输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        error_msg = f"⚠️ 低频[{cur_date}-{end_date}]输入有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
                         logger.error(error_msg)
                         raise Exception(error_msg)
 
                     if torch.isinf(labels).any():
-                        error_msg = f"⚠️ 标签有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        error_msg = f"⚠️ 标签[{cur_date}-{end_date}]有 Inf! 比例: {torch.isinf(x_mid).float().mean():.2%}"
                         logger.error(error_msg)
                         raise Exception(error_msg)
 
@@ -687,9 +701,10 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 loss_val = loss.item()
-                if loss_val != loss_val:
+                if loss_val == loss_val:
+                    save_model_and_date(model, optimizer, recommended_lr, save_dir, cur_batch, cur_date, end_date)
                     if torch.isnan(logits).any():
-                        error_msg = f"⚠️ 预测结果中有 nan! 比例: {torch.isinf(x_mid).float().mean():.2%}"
+                        error_msg = f"⚠️ 预测[{cur_date}-{end_date}]结果中有 nan! 比例: {torch.isinf(logits).float().mean():.2%}"
                         logger.error(error_msg)
                     else:
                         error_msg = f"loss 值为 0"
@@ -719,7 +734,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                         end_time = datetime.datetime.now()
                         # epoch_tracker.record(f"Train[{epoch},{cur_batch}]", logger)
                         print(
-                            f"[{cur_batch}/{total_batchs}] cost: {end_time - start_time}, loss = {loss_val}, mean_loss:{total_train_loss / cur_batch}")
+                            f"[{cur_batch}/{total_batchs}]([{cur_date}-{end_date}])cost: {end_time - start_time}, loss = {loss_val}, mean_loss:{total_train_loss / cur_batch}")
                         start_time = end_time
 
             avg_train_loss = total_train_loss / cur_batch

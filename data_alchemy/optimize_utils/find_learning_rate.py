@@ -128,7 +128,6 @@ def find_best_lr(
 
             pyo.plot(fig, filename=output_html, auto_open=False)
             print(f"✅ LR Range Test chart saved to: {output_html}")
-            print(f"💡 Recommended learning rate: {best_lr_approx:.2e}")
 
         except ImportError:
             print("⚠️ Warning: plotly not installed. Skipping HTML output.")

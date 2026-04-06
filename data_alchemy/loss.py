@@ -316,9 +316,9 @@ class MultiHeadBinaryFocalLoss(nn.Module):
         for h in range(H):
             pred_h = preds[:, h]
             target_h = targets[:, h]
-            tp = ((pred_h == 1) & (target_h == 1)).sum().item()
-            fp = ((pred_h == 1) & (target_h == 0)).sum().item()
-            fn = ((pred_h == 0) & (target_h == 1)).sum().item()
+            tp = ((pred_h == True) & (target_h == True)).sum().item()
+            fp = ((pred_h == True) & (target_h == False)).sum().item()
+            fn = ((pred_h == False) & (target_h == True)).sum().item()
             #print(f"tp={tp}, fp={fp}, fn={fn}")
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
