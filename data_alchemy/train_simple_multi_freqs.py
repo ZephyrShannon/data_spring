@@ -701,7 +701,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 loss_val = loss.item()
-                if loss_val == loss_val:
+                if loss_val != loss_val:
                     save_model_and_date(model, optimizer, recommended_lr, save_dir, cur_batch, cur_date, end_date)
                     if torch.isnan(logits).any():
                         error_msg = f"⚠️ 预测[{cur_date}-{end_date}]结果中有 nan! 比例: {torch.isinf(logits).float().mean():.2%}"
