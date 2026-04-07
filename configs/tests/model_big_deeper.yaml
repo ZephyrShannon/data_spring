@@ -200,7 +200,7 @@ training:
   low_freq_type: factor_k1h
   mid_freq_type: factor_k1m
   prefetch_factor: 1
-  lr: 0.0001
+  lr: 0.0010360593056256342
   weight_decay: 0.0001
   betas:
     - 0.9

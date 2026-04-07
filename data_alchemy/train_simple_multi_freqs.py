@@ -566,7 +566,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         },
     ]
     # Model
-    lr = config["training"]["lr"]
+    lr = config["training"].get("lr", None)
     weight_decay = config["training"]["weight_decay"]
     betas = config["training"].get("betas",  (0.9, 0.999))
     # === 优化器 & 调度器 ===
@@ -613,14 +613,17 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
         optimizer = None
 
     if optimizer is None:
-        optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=1e-7, weight_decay=1e-4)
+        if lr is None:
+            optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=1e-7, weight_decay=1e-4)
 
-        # 执行 LR 测试（只跑 1 个 epoch）
-        lrs, losses = find_best_lr(model, train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
+            # 执行 LR 测试（只跑 1 个 epoch）
+            lrs, losses = find_best_lr(model, train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
                                    device=device)
 
-        steepest_lr, recommended_lr = get_best_lr(lrs, losses, 3, 1);
-        logger.info(f"Find best learning rate: {recommended_lr}")
+            steepest_lr, recommended_lr = get_best_lr(lrs, losses, 3, 1);
+            logger.info(f"Find best learning rate: {recommended_lr}")
+        else:
+            recommended_lr = lr
         optimizer = torch.optim.AdamW(
             optimizer_grouped_parameters,
             lr=recommended_lr, weight_decay=1e-4,
@@ -641,11 +644,11 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
     class_weights = {k: v.to(device) for k, v in class_weights.items()}
 
     break_on_debug = False
-    procedure_tracker.record("Start_Epoch", logger)
+    #procedure_tracker.record("Start_Epoch", logger)
     logger.info(f"Start training, {start_epoch}/{epochs}")
 
     for epoch in range(start_epoch, epochs):
-        epoch_tracker = MemTracker("epoch_tracker", procedure_tracker.snapshot)
+        #epoch_tracker = MemTracker("epoch_tracker", procedure_tracker.snapshot)
         # --- Train ---
         model.train()
         total_train_loss = 0.0
@@ -701,23 +704,29 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 loss_val = loss.item()
+                end_time = datetime.datetime.now()
+                # epoch_tracker.record(f"Train[{epoch},{cur_batch}]", logger)
+
+                cur_batch += 1
+                total_train_loss += loss_val
+                print(
+                    f"[{cur_batch}/{total_batchs}]([{cur_date}-{end_date}])cost: {end_time - start_time}, loss = {loss_val}, mean_loss:{total_train_loss / cur_batch}")
+                start_time = end_time
                 if loss_val != loss_val:
                     save_model_and_date(model, optimizer, recommended_lr, save_dir, cur_batch, cur_date, end_date)
                     if torch.isnan(logits).any():
-                        error_msg = f"⚠️ 预测[{cur_date}-{end_date}]结果中有 nan! 比例: {torch.isinf(logits).float().mean():.2%}"
+                        error_msg = f"⚠️ 预测[{cur_date}-{end_date}]结果中有 nan! 比例: {torch.isnan(logits).float().mean():.2%}"
                         logger.error(error_msg)
                     else:
                         error_msg = f"loss 值为 0"
                     check_gradient_explosion(model)
                     raise Exception(error_msg)
 
-                total_train_loss += loss_val
                 optimizer.zero_grad()
                 loss.backward()
                 #if grad_clip > 0:
                 #    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
-                cur_batch += 1
                 end_time = datetime.datetime.now()
                 if break_on_debug:
                     logger.info("Detected 'epoch.stop' file. Stopping training loop gracefully.")
@@ -730,18 +739,13 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                         model.mf_extractor.dnn1.print_gradient_analysis(logger, "mf_extractor.dnn1")
                         model.lf_extractor.dnn2.print_gradient_analysis(logger, "lf_extractor.dnn2")
                         model.lf_extractor.dnn1.print_gradient_analysis(logger, "lf_extractor.dnn1")
-                    else:
-                        end_time = datetime.datetime.now()
-                        # epoch_tracker.record(f"Train[{epoch},{cur_batch}]", logger)
-                        print(
-                            f"[{cur_batch}/{total_batchs}]([{cur_date}-{end_date}])cost: {end_time - start_time}, loss = {loss_val}, mean_loss:{total_train_loss / cur_batch}")
-                        start_time = end_time
+
 
             avg_train_loss = total_train_loss / cur_batch
         else:
             avg_train_loss = 0
 
-        procedure_tracker.record(f"Train[{epoch}] ends.",logger)
+        #procedure_tracker.record(f"Train[{epoch}] ends.",logger)
         # --- Validate ---
         model.eval()
         total_val_loss = 0.0
