@@ -617,7 +617,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
             optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=1e-7, weight_decay=1e-4)
 
             # 执行 LR 测试（只跑 1 个 epoch）
-            lrs, losses = find_best_lr(model, train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
+            lrs, losses = find_best_lr(model.copy(), train_loader, optimizer, criterion, total_batchs, output_html=f"{save_dir}/lr.html",
                                    device=device)
 
             steepest_lr, recommended_lr = get_best_lr(lrs, losses, 3, 1);
@@ -793,7 +793,10 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                 mean_larger_08 = all_probs[larger_08].mean()
             mid = ((all_probs >= 0.4) & (all_probs <= 0.6))
             num_mid = mid.sum()
-            mean_mid = all_probs[mid].mean()
+            if num_mid < 1:
+                mean_mid = 0.0
+            else:
+                mean_mid = all_probs[mid].mean()
 
             logger.info(f"Probability distribution: [0-0.2]: [{mean_less_02},{num_less_02}], "
                         f"[0.2-0.8]: [{mean_mid},{num_mid}] "
@@ -801,7 +804,7 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
         avg_val_loss = total_val_loss / len(val_loader)
         # 在每个验证步骤后调用
-        scheduler.step(epoch)
+        scheduler.step()
 
         total_norm = 0
         for p in model.parameters():

@@ -327,8 +327,7 @@ class MultiFreqMultiLabelClassifier(nn.Module):
         logger.info("\n" + "=" * 70)
         logger.info("标签头梯度衰减分析报告")
         logger.info("=" * 70)
-
-        if 'summary' not in results:
+        if 'summary' not in results.keys():
             logger.info("无法获取梯度信息，请确保已经执行了 backward()")
             return
 

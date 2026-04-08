@@ -290,7 +290,7 @@ class SegmentSets(Dataset):
 
         x_mid_tensor = torch.FloatTensor(X_mid.values)
         x_low_tensor = torch.FloatTensor(X_low.values)
-        y_tensor = torch.FloatTensor(y.values.ravel())  # 注意：分类标签应为 LongTensor！ 二分类是FloatTensor
+        y_tensor = torch.FloatTensor(y.values)  # 注意：分类标签应为 LongTensor！ 二分类是FloatTensor
         if self.load_hf_data:
             return x_high_tensor, x_mid_tensor, x_low_tensor, y_tensor
         else:
