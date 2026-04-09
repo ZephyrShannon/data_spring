@@ -700,7 +700,6 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
                         logger.error(error_msg)
                         raise Exception(error_msg)
 
-                optimizer.zero_grad()
                 logits = model(x_low, x_mid)
                 loss = criterion(logits, labels)
                 loss_val = loss.item()
@@ -724,8 +723,8 @@ def start_train(config, data_dir, market, start_time, end_time, resume_from: Opt
 
                 optimizer.zero_grad()
                 loss.backward()
-                #if grad_clip > 0:
-                #    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
                 end_time = datetime.datetime.now()
                 if break_on_debug:
